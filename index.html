@@ -1,0 +1,664 @@
+<title>Neon Gokart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Russo+One&display=swap">
+<style>
+/* Single-look neon arcade: full-screen canvas, everything drawn in-canvas. */
+:root{--bg:#07040d;--fg:#ffffff;color-scheme:dark}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);overscroll-behavior:none}
+#c{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;outline:none}
+#probe{position:fixed;top:0;left:0;width:0;height:0;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);visibility:hidden;pointer-events:none}
+</style>
+<canvas id="c" tabindex="0" aria-label="Neon Gokart"></canvas>
+<div id="probe"></div>
+<script>
+(()=>{'use strict';
+const cv=document.getElementById('c'),ctx=cv.getContext('2d',{alpha:false});
+const probe=document.getElementById('probe');
+const FONT='"Russo One","Arial Black",Impact,sans-serif';
+const RM=!!(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches);
+let W=1,H=1,DPR=1,INS={t:0,r:0,b:0,l:0};
+function resize(){DPR=Math.min(window.devicePixelRatio||1,2.5);W=window.innerWidth;H=window.innerHeight;cv.width=Math.max(1,Math.round(W*DPR));cv.height=Math.max(1,Math.round(H*DPR));const cs=getComputedStyle(probe);INS={t:parseFloat(cs.paddingTop)||0,r:parseFloat(cs.paddingRight)||0,b:parseFloat(cs.paddingBottom)||0,l:parseFloat(cs.paddingLeft)||0};}
+window.addEventListener('resize',resize);resize();
+if(document.fonts&&document.fonts.load)document.fonts.load('24px "Russo One"').catch(()=>{});
+
+const TAU=Math.PI*2;
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const hsl=(h,s,l,a=1)=>`hsla(${((h%360)+360)%360},${s}%,${l}%,${a})`;
+function angDiff(a,b){let d=(b-a)%TAU;if(d>Math.PI)d-=TAU;if(d<-Math.PI)d+=TAU;return d;}
+function fmt(t){if(t==null||!isFinite(t))return '-:--.--';const m=Math.floor(t/60),s=t-m*60;return m+':'+(s<10?'0':'')+s.toFixed(2);}
+const store={get(k,d){try{const v=localStorage.getItem('ngk_'+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set(k,v){try{localStorage.setItem('ngk_'+k,JSON.stringify(v));}catch(e){}}};
+const settings=Object.assign({music:true,sfx:true,bot:false,view:'fps',sky:'cyber'},store.get('settings',{}));
+const records=store.get('records2',{})||{};
+
+// racing line: the rival bot's lateral grip and braking (u/s²) set its speed through each corner
+const BOT_LAT=1900,BOT_DEC=900;
+//#TRACKS-BEGIN
+const HW=75,STEP=10;
+// Stylised layouts, clockwise, start/finish at the first point. len = real length (km) x ~1700 units.
+const TRACK_DEFS=[
+ {id:'monaco',name:'MONACO',sub:'CIRCUIT DE MONACO · 3.34 KM',hue:322,len:7125,pts:[[20,60],[28,54],[36,49],[42,47],[46,44],[50,38],[55,31],[60,25],[65,21],[71,21],[75,24],[77,30],[76,36],[72,39],[70,43],[73,47],[78,49],[82,53],[82,59],[78,63],[70,65],[60,66],[52,66],[48,69],[44,67],[38,68],[33,72],[29,70],[25,73],[19,75],[13,72],[12,66],[15,62]]},
+ {id:'silverstone',name:'SILVERSTONE',sub:'GREAT BRITAIN · 5.89 KM',hue:158,len:12000,pts:[[84,30],[86,45],[86,58],[82,66],[76,72],[72,78],[66,80],[62,76],[58,72],[46,74],[34,76],[26,78],[20,74],[18,68],[20,60],[22,50],[28,42],[26,36],[32,30],[48,22],[64,16],[74,12],[80,14],[82,20],[80,26]]},
+ {id:'monza',name:'MONZA',sub:'AUTODROMO NAZIONALE · 5.79 KM',hue:36,len:11750,pts:[[70,80],[55,80],[40,80],[24,80],[16,80],[12,77],[8,77],[4,70],[2,60],[3,50],[6,44],[9,42],[9,38],[12,30],[16,24],[22,20],[28,20],[32,24],[40,34],[48,42],[52,45],[55,50],[58,51],[66,54],[76,58],[84,62],[90,66],[93,72],[90,78],[84,80]]}
+];
+function buildTrack(d){
+ let p=d.pts.map(a=>({x:a[0],y:a[1]}));
+ for(let it=0;it<4;it++){const q=[];for(let i=0;i<p.length;i++){const a=p[i],b=p[(i+1)%p.length];q.push({x:a.x*.75+b.x*.25,y:a.y*.75+b.y*.25},{x:a.x*.25+b.x*.75,y:a.y*.25+b.y*.75});}p=q;}
+ let L=0;for(let i=0;i<p.length;i++){const a=p[i],b=p[(i+1)%p.length];L+=Math.hypot(b.x-a.x,b.y-a.y);}
+ const sc=d.len/L;p=p.map(v=>({x:v.x*sc,y:v.y*sc}));
+ const P=[];let carry=0;
+ for(let i=0;i<p.length;i++){const a=p[i],b=p[(i+1)%p.length];const sl=Math.hypot(b.x-a.x,b.y-a.y);let t=carry;while(t<sl){P.push({x:a.x+(b.x-a.x)*t/sl,y:a.y+(b.y-a.y)*t/sl});t+=STEP;}carry=t-sl;}
+ const N=P.length,tx=new Float32Array(N),ty=new Float32Array(N),nx=new Float32Array(N),ny=new Float32Array(N),k=new Float32Array(N);
+ for(let i=0;i<N;i++){const a=P[(i-1+N)%N],b=P[(i+1)%N];const dx=b.x-a.x,dy=b.y-a.y,l=Math.hypot(dx,dy)||1;tx[i]=dx/l;ty[i]=dy/l;nx[i]=-ty[i];ny[i]=tx[i];}
+ for(let i=0;i<N;i++){const j1=(i-4+N)%N,j2=(i+4)%N;const cr=tx[j1]*ty[j2]-ty[j1]*tx[j2];k[i]=Math.asin(clamp(cr,-1,1))/(8*STEP);}
+ const apex=[];
+ for(let i=0;i<N;i++){const ak=Math.abs(k[i]);if(ak<1/320)continue;let ok=true;for(let o=-18;o<=18&&ok;o++){if(!o)continue;const v=Math.abs(k[(i+o+N)%N]);if(v>ak||(v===ak&&o<0))ok=false;}if(ok)apex.push({i,s:Math.sign(k[i])});}
+ // racing line = an elastic band pulled tight inside the track: it cuts every corner at the apex
+ const off=new Float32Array(N),olim=HW-16;
+ for(const span of [48,30,18,10])for(let it=0;it<40;it++)for(let i=0;i<N;i++){const a=(i-span+N)%N,b=(i+span)%N;
+  const mx=(P[a].x+nx[a]*off[a]+P[b].x+nx[b]*off[b])/2,my=(P[a].y+ny[a]*off[a]+P[b].y+ny[b]*off[b])/2;
+  off[i]=clamp((mx-P[i].x)*nx[i]+(my-P[i].y)*ny[i],-olim,olim);}
+ for(let it=0;it<12;it++){const o2=Float32Array.from(off);for(let i=0;i<N;i++)off[i]=(o2[(i-1+N)%N]+2*o2[i]+o2[(i+1)%N])/4;}
+ const LX=new Float32Array(N),LY=new Float32Array(N),lds=new Float32Array(N),lh=new Float32Array(N),lk=new Float32Array(N),lv=new Float32Array(N);
+ for(let i=0;i<N;i++){LX[i]=P[i].x+nx[i]*off[i];LY[i]=P[i].y+ny[i]*off[i];}
+ for(let i=0;i<N;i++){const j=(i+1)%N,dx=LX[j]-LX[i],dy=LY[j]-LY[i];lds[i]=Math.max(1,Math.hypot(dx,dy));lh[i]=Math.atan2(dy,dx);}
+ for(let i=0;i<N;i++){let sd=0;for(let o=-3;o<3;o++)sd+=lds[(i+o+N)%N];lk[i]=angDiff(lh[(i-3+N)%N],lh[(i+3)%N])/sd;}
+ // bot speed profile: corner limit, then braking zones worked backwards from each corner
+ for(let i=0;i<N;i++)lv[i]=Math.min(3000,Math.sqrt(BOT_LAT/Math.max(Math.abs(lk[i]),1e-5)));
+ for(let pass=0;pass<2;pass++)for(let i=N-1;i>=0;i--){const j=(i+1)%N;lv[i]=Math.min(lv[i],Math.sqrt(lv[j]*lv[j]+2*BOT_DEC*lds[i]));}
+ let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;for(const v of P){minX=Math.min(minX,v.x);minY=Math.min(minY,v.y);maxX=Math.max(maxX,v.x);maxY=Math.max(maxY,v.y);}
+ return Object.assign({},d,{N,P,tx,ty,nx,ny,k,apex,off,LX,LY,lds,lh,lk,lv,minX,minY,maxX,maxY});
+}
+//#TRACKS-END
+const TRACKS=TRACK_DEFS.map(buildTrack);
+for(const T of TRACKS){const pa=new Path2D();pa.moveTo(T.P[0].x,T.P[0].y);for(let i=1;i<T.N;i++)pa.lineTo(T.P[i].x,T.P[i].y);pa.closePath();T.path=pa;
+ const lp=new Path2D();lp.moveTo(T.LX[0],T.LY[0]);for(let i=1;i<T.N;i++)lp.lineTo(T.LX[i],T.LY[i]);lp.closePath();T.linePath=lp;}
+const SLOTS=TRACKS.length+1; // last slot: future track
+
+// ---------- tuning ----------
+const LAPS=5,V0=520,ACC=700,BRAKE=1500,DT=1/120;
+const A_GRIP=1350,LINE_GRIP=.7,BOT_SKILL=.93,ASSIST_STEP=.2,ASSIST_MIN=.4,A_DRIFT=2600,SCRUB=.55;   // tyre grip limit (u/s²), drift turning strength, speed scrubbed by the slide
+const FLOW_GAIN=0.85,FLOW_TAU=40;           // vmax = V0*(1+0.85F), dF/dt=(1-F)/40 while clean
+const LVL_AT=[0,0.5,1.3,2.3],LVLC=['#fff','#38d6ff','#ff9a1f','#ff3df0'];
+
+// ---------- state ----------
+const G={state:'title',t:0,sel:0,slide:0,overlay:null,toast:null,drawOv:false,swipe:null};
+let R=null;
+const UI=[];
+const keys=new Set();
+const ptr={left:null,right:null};
+const uiU=()=>clamp(Math.min(W,H)/420,0.75,1.5);
+
+// ---------- audio ----------
+const A={C:null,beats:[],pulse:0,step:0,next:0,tr:0,E:null};
+const mtof=m=>440*Math.pow(2,(m-69)/12);
+function makeImpulse(C,sec){const len=Math.floor(C.sampleRate*sec),b=C.createBuffer(2,len,C.sampleRate);for(let ch=0;ch<2;ch++){const d=b.getChannelData(ch);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,3);}return b;}
+function makeNoise(C){const len=C.sampleRate,b=C.createBuffer(1,len,C.sampleRate),d=b.getChannelData(0);for(let i=0;i<len;i++)d[i]=Math.random()*2-1;return b;}
+function initAudio(){
+ if(A.C){if(A.C.state==='suspended')A.C.resume();return;}
+ const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return;
+ let C;try{C=new AC();}catch(e){return;}
+ A.C=C;
+ const comp=C.createDynamicsCompressor();comp.threshold.value=-16;comp.knee.value=12;comp.ratio.value=5;comp.attack.value=.004;comp.release.value=.2;comp.connect(C.destination);
+ A.master=C.createGain();A.master.gain.value=.85;A.master.connect(comp);
+ A.fx=C.createGain();A.fx.connect(A.master);
+ A.rev=C.createConvolver();A.rev.buffer=makeImpulse(C,2.8);const rg=C.createGain();rg.gain.value=.5;A.rev.connect(rg);rg.connect(A.master);
+ const fs=C.createGain();fs.gain.value=.18;A.fx.connect(fs);fs.connect(A.rev);
+ A.noise=makeNoise(C);
+ buildEngine();applySettings();
+}
+function applySettings(){if(!A.C)return;A.fx.gain.setTargetAtTime(settings.sfx?1:0,A.C.currentTime,.05);}
+function env(g,t,peak,att,dec){g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(peak,t+att);g.gain.exponentialRampToValueAtTime(.0001,t+att+dec);}
+
+// Engine = endless-rising Shepard-Risset glissando (the "always climbing" tension) filtered like an EV whine.
+function buildEngine(){
+ const C=A.C,E=A.E={phase:0,prev:[]};
+ E.filter=C.createBiquadFilter();E.filter.type='lowpass';E.filter.frequency.value=600;E.filter.Q.value=2;
+ E.out=C.createGain();E.out.gain.value=0;E.filter.connect(E.out);E.out.connect(A.fx);
+ E.oscs=[];
+ for(let k=0;k<6;k++){const o=C.createOscillator();o.type='triangle';const g=C.createGain();g.gain.value=0;o.connect(g);g.connect(E.filter);o.start();E.oscs.push({o,g});E.prev.push(k);}
+ E.whine=C.createOscillator();E.whine.type='sine';E.wg=C.createGain();E.wg.gain.value=0;E.whine.connect(E.wg);E.wg.connect(A.fx);E.whine.start();
+ E.ns=C.createBufferSource();E.ns.buffer=A.noise;E.ns.loop=true;E.nf=C.createBiquadFilter();E.nf.type='bandpass';E.nf.frequency.value=1800;E.nf.Q.value=4;E.ng=C.createGain();E.ng.gain.value=0;E.ns.connect(E.nf);E.nf.connect(E.ng);E.ng.connect(A.fx);E.ns.start();
+}
+function engineTick(dt){
+ const E=A.E;if(!E)return;const t=A.C.currentTime;
+ let on=0,sn=0,thr=0,drift=0,lvl=0;
+ if(G.state==='race'&&R&&G.overlay!=='pause'){on=1;thr=R.thr;sn=Math.hypot(R.vx,R.vy)/V0;if(R.phase==='count')sn=R.thr*.45;if(R.phase==='finish')thr=.2;drift=R.drift?1:0;lvl=R.lvl;}
+ E.phase=(E.phase+dt*(.03+.24*Math.min(2,sn)*(.4+.6*thr)))%6;
+ for(let k=0;k<6;k++){const pos=(k+E.phase)%6,f=32*Math.pow(2,pos),w=Math.exp(-Math.pow(pos-3,2)/1.8);const os=E.oscs[k];
+  if(pos<E.prev[k])os.o.frequency.setValueAtTime(f,t);else os.o.frequency.setTargetAtTime(f,t,.02);
+  os.g.gain.setTargetAtTime(w*.16,t,.03);E.prev[k]=pos;}
+ E.out.gain.setTargetAtTime(on*(.08+.22*thr+.14*Math.min(1.5,sn)),t,.06);
+ E.filter.frequency.setTargetAtTime(350+2400*Math.min(1.6,sn)*(.5+.5*thr)+700*drift,t,.05);
+ E.whine.frequency.setTargetAtTime(220+520*Math.min(2,sn),t,.05);E.wg.gain.setTargetAtTime(on*.022*Math.min(1.5,sn),t,.08);
+ E.ng.gain.setTargetAtTime(on*drift*.05*Math.min(1,sn),t,.04);E.nf.frequency.setTargetAtTime(1500+500*lvl,t,.05);
+}
+function tone(type,f,t,v,d,f2){const C=A.C,os=C.createOscillator();os.type=type;os.frequency.setValueAtTime(f,t);if(f2)os.frequency.exponentialRampToValueAtTime(f2,t+d);const g=C.createGain();env(g,t,v,.004,d);os.connect(g);g.connect(A.fx);os.start(t);os.stop(t+d+.05);}
+function noiseHit(t,type,f,f2,v,d,q=1){const C=A.C,s=C.createBufferSource();s.buffer=A.noise;const fl=C.createBiquadFilter();fl.type=type;fl.Q.value=q;fl.frequency.setValueAtTime(f,t);if(f2)fl.frequency.exponentialRampToValueAtTime(f2,t+d);const g=C.createGain();env(g,t,v,.003,d);s.connect(fl);fl.connect(g);g.connect(A.fx);s.start(t,Math.random()*.4);s.stop(t+d+.05);}
+function sBeep(f,d){if(!A.C)return;tone('square',f,A.C.currentTime,.12,d);}
+function sClick(){if(!A.C)return;tone('sine',1250,A.C.currentTime,.12,.05);}
+function sHit(imp){if(!A.C)return;const t=A.C.currentTime,v=.15+.4*Math.min(1,imp/250);noiseHit(t,'lowpass',900,200,v,.35);tone('sine',95,t,v,.3,35);}
+function sBoost(L){if(!A.C)return;const t=A.C.currentTime;noiseHit(t,'bandpass',300,4200,.22+.06*L,.55,2);tone('sawtooth',110*L,t,.06,.5,440*L);}
+function sApex(){if(!A.C)return;const t=A.C.currentTime;tone('sine',1568,t,.12,.6);tone('sine',2093,t+.06,.09,.6);}
+function sCharge(L){if(!A.C)return;tone('square',[0,660,880,1175][L],A.C.currentTime,.07,.12);}
+function sLap(){if(!A.C)return;const t=A.C.currentTime;[0,4,7,12].forEach((n,i)=>tone('triangle',mtof(74+n),t+i*.07,.14,.25));}
+
+// ---------- race ----------
+function newRace(ti){
+ const T=TRACKS[ti],i0=4,rec=records[T.id]||{};
+ R={T,ti,x:T.P[i0].x,y:T.P[i0].y,h:Math.atan2(T.ty[i0],T.tx[i0]),vx:0,vy:0,F:0,charge:0,lvl:0,drift:false,dDir:0,beta:0,boost:0,
+  idx:i0,prog:i0,lapsDone:0,lapStart:0,time:0,laps:[],count:3.2,phase:'count',hitCool:0,cleanLap:true,shake:0,flash:0,
+  trail:[],parts:[],pops:[],apexHit:new Set(),best:rec.lap==null?null:rec.lap,fin:0,total:0,newLap:false,newTotal:false,thr:0,st:0,br:false,hDir:0,holdT:0,onLine:0,place:0,bot:null,sts:0,wallGrip:0,assist:ASSIST_MIN,assistOn:0};
+ if(settings.bot){R.x-=T.nx[i0]*24;R.y-=T.ny[i0]*24;R.bot={s:i0,s0:i0,lat0:24,v:0,F:0,slip:0,x:0,y:0,h:R.h,done:false,total:null};placeBot(0);}
+ R.camA=R.h;R.camX=R.x;R.camY=R.y;R.fyaw=R.fyawP=R.h;R.px=R.x;R.py=R.y;
+}
+// rival bot: rides the racing line with the speed profile, drifting where the corner load is high
+function placeBot(dt){
+ const b=R.bot,T=R.T,N=T.N,i=Math.floor(b.s)%N,j=(i+1)%N,f=b.s-Math.floor(b.s);
+ let bl=clamp(1-(b.s-b.s0)/80,0,1);bl=bl*bl*(3-2*bl);const lat=(b.lat0-T.off[i])*bl;
+ b.x=T.LX[i]+(T.LX[j]-T.LX[i])*f+T.nx[i]*lat;b.y=T.LY[i]+(T.LY[j]-T.LY[i])*f+T.ny[i]*lat;
+ const load=b.v*b.v*Math.abs(T.lk[i]),ts=Math.sign(T.lk[i])*clamp((load-1000)/900,0,1)*.45;
+ b.slip+=(ts-b.slip)*Math.min(1,dt*5);b.h=T.lh[i]+b.slip;
+}
+function stepBot(dt){
+ const b=R.bot,T=R.T;if(!b||R.phase==='count')return;
+ const i=Math.floor(b.s)%T.N;
+ b.F=Math.min(1,b.F+(1-b.F)/FLOW_TAU*dt);
+ const tgt=b.done?0:Math.min(T.lv[i],V0*(1+FLOW_GAIN*b.F))*BOT_SKILL;
+ b.v=b.v<tgt?Math.min(tgt,b.v+ACC*.9*dt):Math.max(tgt,b.v-BOT_DEC*1.4*dt);
+ b.s+=b.v*dt/T.lds[i];
+ if(!b.done&&b.s>=LAPS*T.N){b.done=true;b.total=R.time;}
+ placeBot(dt);
+ if(Math.abs(b.slip)>.15&&Math.random()<.7){const fx=Math.cos(b.h),fy=Math.sin(b.h),bx=Math.cos(T.lh[i])*b.v,by=Math.sin(T.lh[i])*b.v;
+  for(const sd of [-1,1]){const aa=b.h+Math.PI+(Math.random()-.5)*.9,sp=60+Math.random()*120;spawn(b.x-fx*10-fy*8*sd,b.y-fy*10+fx*8*sd,Math.cos(aa)*sp+bx*.3,Math.sin(aa)*sp+by*.3,.35,'#fff',2.5);}}
+}
+function startRace(ti){newRace(ti);G.state='race';G.overlay=null;ptr.left=ptr.right=null;}
+function pop(text,c='#fff',life=1.2){if(R)R.pops.push({text,c,life,max:life});}
+function spawn(x,y,vx,vy,life,c,s){if(R.parts.length>500)return;R.parts.push({x,y,vx,vy,life,max:life,c,s});}
+function updParts(dt){const ps=R.parts;for(let i=ps.length-1;i>=0;i--){const p=ps[i];p.life-=dt;if(p.life<=0){ps[i]=ps[ps.length-1];ps.pop();continue;}p.x+=p.vx*dt;p.y+=p.vy*dt;const d=1-dt*3;p.vx*=d;p.vy*=d;}}
+// two-button controls: left half steers left, right half steers right, gas is automatic.
+// Holding one side for HOLD_DRIFT seconds at speed starts a drift; letting go fires the boost.
+const HOLD_DRIFT=.3;
+function readInput(){
+ const L=!!ptr.left||keys.has('arrowleft')||keys.has('a'),Rt=!!ptr.right||keys.has('arrowright')||keys.has('d');
+ return{thr:1,st:(Rt?1:0)-(L?1:0),L,R:Rt};
+}
+function endDrift(reward){
+ const r=R;if(!r.drift)return;const L=r.lvl;r.drift=false;r.lvl=0;r.charge=0;
+ if(reward&&L>0){r.boost=[0,.5,.85,1.3][L];const fx=Math.cos(r.h),fy=Math.sin(r.h);r.vx+=fx*70*L;r.vy+=fy*70*L;r.F=Math.min(1,r.F+.015*L);
+  pop(['','BOOST','SUPER BOOST','ULTRA BOOST'][L],LVLC[L]);sBoost(L);
+  for(let i=0;i<14*L;i++){const a=r.h+Math.PI+(Math.random()-.5)*1.2,s=150+Math.random()*250;spawn(r.x-fx*12,r.y-fy*12,Math.cos(a)*s,Math.sin(a)*s,.5,LVLC[L],4);}}
+}
+// camera follows the road ahead, not the steering
+// first-person yaw: follows the direction of travel blended with the road ahead, low-passed and rate-limited,
+// so taps, drift slip and assist corrections never whip the view around
+function fpsYaw(dt){const r=R,T=r.T,sp=Math.hypot(r.vx,r.vy),vd=sp>40?Math.atan2(r.vy,r.vx):r.h,a=T.P[(r.idx+6)%T.N],b=T.P[(r.idx+28)%T.N];
+ const tgt=vd+angDiff(vd,Math.atan2(b.y-a.y,b.x-a.x))*.5;r.fyawP=r.fyaw;r.fyaw+=clamp(angDiff(r.fyaw,tgt)*Math.min(1,dt*3),-1.8*dt,1.8*dt);}
+function camFollow(dt){fpsYaw(dt);const r=R,T=r.T,a=T.P[(r.idx+8)%T.N],b=T.P[(r.idx+40)%T.N];r.camA+=angDiff(r.camA,Math.atan2(b.y-a.y,b.x-a.x))*Math.min(1,dt*1.6);r.camX=r.x;r.camY=r.y;}
+function stepRace(dt){
+ const r=R,T=r.T,inp=readInput();
+ r.px=r.x;r.py=r.y;
+ const dir=Math.sign(inp.st);if(dir&&dir===r.hDir)r.holdT+=dt;else{r.hDir=dir;r.holdT=0;}
+ inp.br=r.drift?(r.dDir<0?inp.L:inp.R):(dir!==0&&r.holdT>=HOLD_DRIFT);
+ r.thr=inp.thr;r.st=inp.st;r.br=inp.br;
+ if(r.bot)stepBot(dt);
+ r.shake=Math.max(0,r.shake-dt*2.5);r.flash=Math.max(0,r.flash-dt*2);r.hitCool-=dt;
+ updParts(dt);for(const p of r.pops)p.life-=dt;r.pops=r.pops.filter(p=>p.life>0);
+ if(r.phase==='count'){const prev=Math.ceil(r.count);r.count-=dt;const nw=Math.ceil(r.count);
+  if(nw<prev&&nw>0&&nw<=3)sBeep(440,.18);
+  if(r.count<=0){r.phase='go';r.time=0;r.lapStart=0;sBeep(880,.4);pop('GO!','#fff',1.1);}
+  camFollow(dt);return;}
+ let thr=inp.thr,st=inp.st,br=inp.br;
+ r.sts+=(st-r.sts)*Math.min(1,dt*12);st=r.sts;
+ if(r.phase==='finish'){const j=(r.idx+14)%T.N,des=Math.atan2(T.P[j].y-r.y,T.P[j].x-r.x);st=clamp(angDiff(r.h,des)*2.2,-1,1);thr=Math.hypot(r.vx,r.vy)<V0*.55?.6:0;br=false;r.fin+=dt;}
+ else r.time+=dt;
+ const spd=Math.hypot(r.vx,r.vy);
+ // on the racing line the tyres grip harder
+ {const li=r.idx,lat=(r.x-T.P[li].x)*T.nx[li]+(r.y-T.P[li].y)*T.ny[li];r.onLine+=(clamp(1-Math.abs(lat-T.off[li])/30,0,1)-r.onLine)*Math.min(1,dt*8);}
+ let vmax=V0*(1+FLOW_GAIN*r.F);if(r.boost>0)vmax*=1.3;
+ if(!r.drift&&br&&Math.abs(st)>.3&&spd>V0*.4&&r.phase==='go'){r.drift=true;r.dDir=Math.sign(st);r.charge=0;r.lvl=0;r.beta=0;}
+ if(r.drift&&(!br||spd<V0*.25))endDrift(!br);
+ if(r.drift){
+  // drift: steering sets the slip angle; a wider angle turns the car tighter but scrubs more speed
+  let psi=Math.atan2(r.vy,r.vx);
+  const tb=r.dDir*clamp(.38+.32*st*r.dDir,.06,.75);
+  r.beta+=(tb-r.beta)*Math.min(1,dt*6);
+  psi+=Math.sign(r.beta)*Math.min(4,A_DRIFT*Math.abs(Math.sin(r.beta))/Math.max(spd,80))*dt;
+  let s=spd+(thr*ACC*.8*(1-spd/vmax)-SCRUB*Math.abs(Math.sin(r.beta))*spd)*dt;
+  if(r.boost>0){r.boost-=dt;s+=700*dt;}
+  s=Math.max(0,s);r.vx=Math.cos(psi)*s;r.vy=Math.sin(psi)*s;r.h=psi+r.beta;
+  r.charge+=dt*(.4+1.6*Math.abs(r.beta))*clamp(spd/V0,.5,1.6);
+  const L=r.charge>=LVL_AT[3]?3:r.charge>=LVL_AT[2]?2:r.charge>=LVL_AT[1]?1:0;
+  if(L>r.lvl){r.lvl=L;sCharge(L);}
+ }else{
+  // grip: the tyres cap how fast the kart can turn at speed, so tight corners need the brake or a drift
+  const want=st*4.2*clamp(.25+spd/170,0,1),cap=A_GRIP*(1+LINE_GRIP*r.onLine+(r.wallGrip>0?.6:0))/Math.max(spd,60);r.wallGrip-=dt;
+  r.h+=clamp(want,-cap,cap)*dt;
+  const gx=Math.cos(r.h),gy=Math.sin(r.h);
+  let vf=r.vx*gx+r.vy*gy,vl=-r.vx*gy+r.vy*gx,a=thr*ACC*(1-vf/vmax);
+  if(thr<.05)a-=160;if(br)a-=BRAKE;
+  if(vf>vmax)a=Math.min(a,-(vf-vmax)*1.2);
+  if(r.boost>0){r.boost-=dt;a+=700;}
+  vf=Math.max(0,vf+a*dt);vl*=Math.exp(-9*dt);
+  r.vx=gx*vf-gy*vl;r.vy=gy*vf+gx*vl;
+ }
+ // aim assist: in a corner, pressing the right way (or riding a boost) pulls the kart onto the racing line.
+ // It starts weak and every apex taken makes it stronger.
+ {const sp=Math.hypot(r.vx,r.vy),j=(r.idx+6+Math.floor(sp/60))%T.N,ck=T.lk[(r.idx+10)%T.N];
+  const corner=Math.abs(ck)>1/420&&Math.sign(st)===Math.sign(ck),on=r.phase==='go'&&sp>60&&(corner||r.boost>0);
+  r.assistOn+=((on?1:0)-r.assistOn)*Math.min(1,dt*10);
+  if(on){const k=.4+.9*r.assist,des=Math.atan2(T.LY[j]-r.y,T.LX[j]-r.x),psi=Math.atan2(r.vy,r.vx),d=angDiff(psi,des)*Math.min(1,dt*5*k);
+   const c=Math.cos(d),sn=Math.sin(d),vx=r.vx;r.vx=vx*c-r.vy*sn;r.vy=vx*sn+r.vy*c;
+   r.h+=r.drift?d:angDiff(r.h,des)*Math.min(1,dt*5*k);}}
+ const fx=Math.cos(r.h),fy=Math.sin(r.h);
+ r.x+=r.vx*dt;r.y+=r.vy*dt;
+ if(r.drift&&Math.random()<.8){const c=LVLC[r.lvl];for(const sd of [-1,1]){const wx=r.x-fx*10-fy*8*sd,wy=r.y-fy*10+fx*8*sd,aa=r.h+Math.PI+(Math.random()-.5)*.9,s=60+Math.random()*120;spawn(wx,wy,Math.cos(aa)*s+r.vx*.3,Math.sin(aa)*s+r.vy*.3,.35,c,r.lvl?3.5:2);}}
+ // nearest centreline sample (local search keeps progress stable)
+ let bd=1e18,bi=r.idx;
+ for(let o=-30;o<=30;o++){const i=(r.idx+o+T.N)%T.N,dx=r.x-T.P[i].x,dy=r.y-T.P[i].y,d=dx*dx+dy*dy;if(d<bd){bd=d;bi=i;}}
+ let di=bi-r.idx;if(di>T.N/2)di-=T.N;else if(di<-T.N/2)di+=T.N;r.prog+=di;r.idx=bi;
+ // walls
+ const P=T.P[bi],dist=Math.sqrt(bd),lim=HW-9;
+ if(dist>lim){const ux=(r.x-P.x)/dist,uy=(r.y-P.y)/dist;r.x=P.x+ux*lim;r.y=P.y+uy*lim;const vn=r.vx*ux+r.vy*uy;
+  if(vn>0){
+   // a wall only slows you down: drop the into-wall speed, turn the nose along the track and keep sliding
+   r.vx-=ux*vn;r.vy-=uy*vn;const tH=Math.atan2(T.ty[bi],T.tx[bi]),tx=Math.cos(tH),ty=Math.sin(tH);
+   // glancing contact rides the wall: no penalty, sparks and a short grip boost (drift keeps going).
+   // Only a head-on hit (into-wall speed > 45% of total) costs a little speed and flow.
+   const hard=vn>60&&vn>.45*spd;
+   if(hard&&r.hitCool<=0&&r.phase==='go'){r.vx*=.88;r.vy*=.88;r.F=Math.max(0,r.F-.1);r.assist=Math.max(ASSIST_MIN,r.assist-ASSIST_STEP);r.cleanLap=false;r.hitCool=.4;r.shake=clamp(vn/300,.2,.7);r.flash=.25;endDrift(false);sHit(vn*.7);pop('BUMP','#ff4d6d',.6);r.h+=angDiff(r.h,tH)*.5;
+    for(let i=0;i<16;i++){const aa=Math.random()*TAU,s=80+Math.random()*220;spawn(r.x+ux*9,r.y+uy*9,Math.cos(aa)*s,Math.sin(aa)*s,.4,hsl(T.hue,100,70),3);}}
+   // glancing contact still costs speed silently: the steeper the touch the more it scrubs, scraping drags and drains flow
+   else if(r.phase==='go'){r.wallGrip=.5;const d=(1-clamp(.9*vn/Math.max(spd,1),0,.35))*(1-dt*2.2);r.vx*=d;r.vy*=d;r.F=Math.max(0,r.F-dt*.08);
+    if(Math.random()<.5){const aa=Math.atan2(-r.vy,-r.vx)+(Math.random()-.5)*.8,s=100+Math.random()*200;spawn(r.x+ux*9,r.y+uy*9,Math.cos(aa)*s,Math.sin(aa)*s,.3,'#fff6c0',2.5);}}
+   if(!r.drift)r.h+=angDiff(r.h,tH)*Math.min(1,dt*6);
+   const vt=r.vx*tx+r.vy*ty,vmin=V0*.3;if(r.phase==='go'&&vt<vmin){r.vx+=tx*(vmin-vt);r.vy+=ty*(vmin-vt);}}}
+ // flow grows while clean and fast
+ const sp2=Math.hypot(r.vx,r.vy);
+ if(r.phase==='go'&&sp2>V0*.55&&r.hitCool<=0)r.F=Math.min(1,r.F+(1-r.F)/FLOW_TAU*dt);
+ r.trail.push({x:r.x-fx*12,y:r.y-fy*12});if(r.trail.length>260)r.trail.shift();
+ // apex: drift through the inside of a corner
+ if(r.phase==='go')for(const ap of T.apex){if(r.apexHit.has(ap.i))continue;let d=r.idx-ap.i;if(d>T.N/2)d-=T.N;else if(d<-T.N/2)d+=T.N;
+  if(Math.abs(d)<=3){const lat=(r.x-T.P[ap.i].x)*T.nx[ap.i]+(r.y-T.P[ap.i].y)*T.ny[ap.i];if(lat*ap.s>HW*.15){r.apexHit.add(ap.i);if(r.drift)r.charge+=.9;r.F=Math.min(1,r.F+.04);r.assist=Math.min(1,r.assist+ASSIST_STEP);
+   pop('APEX  ·  ASSIST '+Math.round(r.assist/ASSIST_STEP),hsl(T.hue+180,100,70),.9);sApex();}}}
+ if(r.phase==='go'&&r.prog>=(r.lapsDone+1)*T.N)lapDone();
+ camFollow(dt);
+}
+function lapDone(){
+ const r=R,T=r.T,lt=r.time-r.lapStart;r.laps.push(lt);r.lapStart=r.time;r.lapsDone++;
+ const rec=records[T.id]||(records[T.id]={});
+ if(rec.lap==null||lt<rec.lap){rec.lap=lt;r.newLap=true;pop('NEW BEST LAP','#fff',1.6);}
+ r.best=rec.lap;
+ if(r.cleanLap){r.F=Math.min(1,r.F+.06);pop('CLEAN LAP  +FLOW',hsl(T.hue,100,72),1.4);}
+ r.cleanLap=true;r.apexHit.clear();sLap();
+ if(r.lapsDone===LAPS-1)pop('FINAL LAP','#ffd23d',1.6);
+ if(r.lapsDone>=LAPS){r.phase='finish';if(r.bot)r.place=r.bot.done?2:1;r.total=r.time;if(rec.total==null||r.total<rec.total){rec.total=r.total;r.newTotal=true;}r.fin=0;endDrift(false);}
+ store.set('records2',records);
+}
+
+// ---------- drawing helpers ----------
+function slab(x,y,w,h,s,side,fill){ctx.beginPath();if(side==='l'){ctx.moveTo(x-s,y);ctx.lineTo(x+w,y);ctx.lineTo(x+w,y+h);ctx.lineTo(x,y+h);}else{ctx.moveTo(x,y);ctx.lineTo(x+w+s,y);ctx.lineTo(x+w,y+h);ctx.lineTo(x,y+h);}ctx.closePath();if(fill){ctx.fillStyle=fill;ctx.fill();}}
+function txt(s,x,y,size,align,color,shadow){ctx.font=`${size}px ${FONT}`;ctx.textAlign=align||'left';ctx.textBaseline='middle';if(shadow){ctx.fillStyle=shadow;ctx.fillText(s,x+size*.06,y+size*.06);}ctx.fillStyle=color||'#fff';ctx.fillText(s,x,y);}
+function tw(s,size){ctx.font=`${size}px ${FONT}`;return ctx.measureText(s).width;}
+function fit(s,size,maxW){const w=tw(s,size);return w>maxW?size*maxW/w:size;}
+function button(x,y,w,h,label,fn,o={}){const s=o.slant==null?10:o.slant;slab(x,y,w,h,s,o.side||'r',o.fill||'rgba(0,0,0,.82)');if(o.stroke){ctx.strokeStyle=o.stroke;ctx.lineWidth=2;ctx.stroke();}
+ if(label)txt(label,x+w/2+(o.side==='l'?-s/2:s/2),y+h/2+1,o.size||16,'center',o.color||'#fff');UI.push({x:x-s,y,w:w+2*s,h,fn,ov:G.drawOv});}
+function toast(text){G.toast={text,life:2.2};}
+function stripes(cx,cy,ang,hue,pulse,sat=70){const RR=Math.hypot(W,H)*1.6,n=6;for(let i=0;i<n;i++){const a0=ang+i*TAU/n,a1=a0+TAU/n;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(a0)*RR,cy+Math.sin(a0)*RR);ctx.lineTo(cx+Math.cos(a1)*RR,cy+Math.sin(a1)*RR);ctx.closePath();ctx.fillStyle=hsl(hue,sat,(i%2?8:13)+pulse*4);ctx.fill();}}
+function poly(cx,cy,n,r,rot){ctx.beginPath();for(let i=0;i<n;i++){const a=rot+i*TAU/n;i?ctx.lineTo(cx+Math.cos(a)*r,cy+Math.sin(a)*r):ctx.moveTo(cx+Math.cos(a)*r,cy+Math.sin(a)*r);}ctx.closePath();}
+function drawKart(x,y,h,hue,sc=1,boost=0){
+ ctx.save();ctx.translate(x,y);ctx.rotate(h);ctx.scale(sc,sc);
+ ctx.globalCompositeOperation='lighter';ctx.fillStyle=hsl(hue,100,60,.22+boost*.25);ctx.beginPath();ctx.ellipse(-2,0,24+boost*10,16,0,0,TAU);ctx.fill();
+ if(boost>0){ctx.fillStyle=hsl(hue,100,70,.5*boost);ctx.beginPath();ctx.moveTo(-14,-4);ctx.lineTo(-60-40*boost,0);ctx.lineTo(-14,4);ctx.closePath();ctx.fill();}
+ ctx.globalCompositeOperation='source-over';
+ ctx.lineWidth=1.5;ctx.strokeStyle=hsl(hue,100,72);ctx.fillStyle='#000';
+ for(const [wx,wy,ww] of [[8,-8.5,7],[8,8.5,7],[-9,-9.5,9],[-9,9.5,9]]){ctx.beginPath();ctx.rect(wx-ww/2,wy-2.8,ww,5.6);ctx.fill();ctx.stroke();}
+ ctx.beginPath();ctx.moveTo(15,0);ctx.lineTo(9,-5);ctx.lineTo(-12,-6.5);ctx.lineTo(-15,0);ctx.lineTo(-12,6.5);ctx.lineTo(9,5);ctx.closePath();ctx.fillStyle='#0b0614';ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=hsl(hue,100,65);ctx.stroke();
+ ctx.beginPath();ctx.arc(-3,0,3.8,0,TAU);ctx.fillStyle='#fff';ctx.fill();
+ ctx.restore();
+}
+function drawGear(x,y,r,a){ctx.save();ctx.translate(x,y);ctx.rotate(a);ctx.fillStyle='#fff';for(let i=0;i<8;i++){ctx.rotate(TAU/8);ctx.fillRect(-r*.22,-r*1.3,r*.44,r*.6);}ctx.beginPath();ctx.arc(0,0,r,0,TAU);ctx.fill();ctx.fillStyle='#000';ctx.beginPath();ctx.arc(0,0,r*.42,0,TAU);ctx.fill();ctx.restore();}
+function strokeTrack(T,glowW,edgeW,innerW,hue,pulse){
+ ctx.lineJoin='round';ctx.lineCap='round';
+ ctx.strokeStyle=hsl(hue,100,55,.16+.1*pulse);ctx.lineWidth=glowW;ctx.stroke(T.path);
+ ctx.strokeStyle=hsl(hue,100,62);ctx.lineWidth=edgeW;ctx.stroke(T.path);
+ ctx.strokeStyle='#06040b';ctx.lineWidth=innerW;ctx.stroke(T.path);
+}
+function drawStartLine(T,sq){const P=T.P[0];ctx.save();ctx.translate(P.x,P.y);ctx.rotate(Math.atan2(T.ty[0],T.tx[0]));const n=Math.round(HW*2/sq);for(let k=0;k<n;k++)for(let row=0;row<2;row++){ctx.fillStyle=(k+row)%2?'#fff':'#111';ctx.fillRect(row*sq-sq,-HW+k*sq,sq,sq);}ctx.restore();}
+function drawTrackPreview(T,cx,cy,size,rot,t){
+ const bw=T.maxX-T.minX,bh=T.maxY-T.minY,s=size/Math.max(bw,bh);
+ ctx.save();ctx.translate(cx,cy);ctx.rotate(rot);ctx.scale(s,s);ctx.translate(-(T.minX+bw/2),-(T.minY+bh/2));
+ strokeTrack(T,HW*2+120,HW*2+34,HW*2,T.hue,A.pulse);
+ drawStartLine(T,20);
+ const i=Math.floor((t*.09%1)*T.N),P=T.P[i];
+ ctx.globalCompositeOperation='lighter';ctx.fillStyle=hsl(T.hue+180,100,65,.5);ctx.beginPath();ctx.arc(P.x,P.y,70,0,TAU);ctx.fill();ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(P.x,P.y,32,0,TAU);ctx.fill();ctx.globalCompositeOperation='source-over';
+ ctx.restore();
+}
+
+// ---------- screens ----------
+function renderTitle(){
+ const t=G.t,hue=(t*14)%360,u=uiU(),spin=RM?.08:.35;
+ stripes(W/2,H/2,t*spin,hue,A.pulse);
+ const rr=Math.min(W,H)*.13*(1+A.pulse*.06);
+ poly(W/2,H/2,8,rr,-t*.6);ctx.fillStyle='#07040d';ctx.fill();ctx.strokeStyle=hsl(hue,100,62);ctx.lineWidth=5;ctx.stroke();
+ const a=-t*1.3;for(let g=6;g>=0;g--){const aa=a+g*.07,orb=rr*1.75;ctx.fillStyle=hsl(hue+180,100,60,.12*(1-g/7));ctx.beginPath();ctx.arc(W/2+Math.cos(aa)*orb,H/2+Math.sin(aa)*orb,9-g,0,TAU);ctx.fill();}
+ drawKart(W/2+Math.cos(a)*rr*1.75,H/2+Math.sin(a)*rr*1.75,Math.atan2(-Math.cos(a),Math.sin(a)),hue+180,1.5);
+ const ts=Math.min(W*.17,H*.17,140),ty=H*.2,tW=tw('GOKART',ts);
+ slab(-30,ty-ts*.64,W/2+tW/2+40,ts*1.28,ts*.45,'r','rgba(0,0,0,.84)');
+ txt('GOKART',W/2,ty,ts,'center','#fff',hsl(hue,100,45));
+ txt('NEON CIRCUIT',W/2+tW/2,ty+ts*.78,Math.max(11,ts*.16),'right',hsl(hue,100,75));
+ const ss=Math.min(28,W*.065),sw=tw('TAP TO START',ss),sy=H*.8,al=.55+.45*Math.sin(t*4);
+ slab(W/2-sw/2-26,sy-ss*.95,sw+52,ss*1.9,ss*.5,'r','rgba(0,0,0,.84)');
+ txt('TAP TO START',W/2+ss*.25,sy+1,ss,'center',`rgba(255,255,255,${al})`);
+ const gs=54*u,gx=W-INS.r-16-gs,gy=H-INS.b-16-gs;
+ button(gx,gy,gs,gs,'',()=>{G.overlay='settings';},{slant:12*u,side:'l'});drawGear(gx+gs/2-6*u,gy+gs/2,gs*.24,t*.4);
+}
+function goSelect(){G.state='select';G.overlay=null;}
+function changeSel(d){G.sel=(G.sel+d+SLOTS)%SLOTS;G.slide=d;sClick();}
+function tryStart(){const T=TRACKS[G.sel];if(T)startRace(G.sel);else toast('A NEW TRACK WILL BE ADDED HERE');}
+function renderSelect(dt){
+ const u=uiU(),t=G.t,T=TRACKS[G.sel],soon=!T,hue=soon?265:T.hue;
+ G.slide*=Math.exp(-dt*10);
+ stripes(W/2,H*.42,t*(RM?.05:.25),hue,A.pulse,soon?25:70);
+ const pcx=W/2+G.slide*W*.5,pcy=H*.42,ps=Math.min(W*.7,H*.46);
+ if(!soon)drawTrackPreview(T,pcx,pcy,ps,Math.sin(t*.4)*.12,t);
+ else{ctx.save();ctx.translate(pcx,pcy);ctx.rotate(Math.sin(t*.4)*.12);const s=ps*.32;poly(0,0,6,s,t*.2);ctx.fillStyle='rgba(0,0,0,.6)';ctx.fill();ctx.setLineDash([12,10]);ctx.strokeStyle=hsl(hue,60,70,.8);ctx.lineWidth=3;ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#fff';ctx.fillRect(-s*.32,-4,s*.64,8);ctx.fillRect(-4,-s*.32,8,s*.64);ctx.restore();}
+ // info band
+ const by=H*.72,ns=Math.min(46*u,H*.085),bh=ns+66*u;
+ slab(-30,by,W+60,bh,0,'r','rgba(0,0,0,.84)');
+ const name=soon?'İLERİDE EKLENECEK':T.name,nsz=fit(name,ns,W-60);
+ txt(name,W/2,by+12*u+nsz/2,nsz,'center','#fff',hsl(hue,100,40));
+ const rec=soon?{}:(records[T.id]||{});
+ const line=soon?'NEW TRACK SLOT':'BEST LAP  '+fmt(rec.lap)+'     BEST RACE  '+fmt(rec.total);
+ txt(line,W/2,by+22*u+ns+8*u,fit(line,14*u,W-40),'center',hsl(hue,100,75));
+ if(!soon)txt(T.sub,W/2,by+22*u+ns+28*u,fit(T.sub,11*u,W-40),'center','rgba(255,255,255,.55)');
+ const al=.5+.5*Math.sin(t*4),ts=18*u,cue=soon?'COMING SOON':'TAP TO RACE  ·  '+LAPS+' LAPS';
+ txt(cue,W/2,Math.min(H-INS.b-22*u,by+bh+26*u),ts,'center',`rgba(255,255,255,${soon?.5:al})`);
+ // arrows
+ const aw=44*u,ah=58*u;
+ button(INS.l+14*u,pcy-ah/2,aw,ah,'<',()=>changeSel(-1),{size:26*u,slant:10*u});
+ button(W-INS.r-14*u-aw,pcy-ah/2,aw,ah,'>',()=>changeSel(1),{size:26*u,slant:10*u,side:'l'});
+ // top-left
+ const bw=Math.max(tw('LEADERBOARD',15*u),tw('MAIN MENU',15*u))+34*u,bH=40*u,x0=INS.l+14*u,y0=INS.t+14*u;
+ button(x0,y0,bw,bH,'MAIN MENU',()=>{G.state='title';},{size:15*u,slant:12*u});
+ button(x0,y0+bH+10*u,bw,bH,'LEADERBOARD',()=>{G.overlay='leaderboard';},{size:15*u,slant:12*u});
+ // bottom-left: rival bot toggle
+ {const lb='RIVAL BOT: '+(settings.bot?'ON':'OFF'),rw=tw('RIVAL BOT: OFF',14*u)+34*u,rh=40*u;
+  button(INS.l+14*u,H-INS.b-14*u-rh,rw,rh,lb,()=>{settings.bot=!settings.bot;store.set('settings',settings);},{size:14*u,slant:12*u,stroke:settings.bot?hsl(hue,100,62):null});}
+ // page dots
+ for(let i=0;i<SLOTS;i++){const dx=W/2+(i-(SLOTS-1)/2)*20*u;poly(dx,by-16*u,4,i===G.sel?7*u:4.5*u,Math.PI/4);ctx.fillStyle=i===G.sel?'#fff':'rgba(255,255,255,.35)';ctx.fill();}
+}
+// first-person view: chase camera a little behind and above the kart. Each frame projects the samples ahead once
+// and draws the road, walls and lines as a handful of batched paths (the per-segment version was too slow on phones).
+const FPS_NEAR=6,FPS_AHEAD=130,FPS_CAMH=17,FPS_BACK=0,FPS_WALL=12;
+function renderFPS(r,T,kh,dt){
+ const al=clamp(G.alpha||0,0,1),yaw=r.fyawP+angDiff(r.fyawP,r.fyaw)*al,ch=Math.cos(yaw),sh=Math.sin(yaw);
+ const kx=r.px+(r.x-r.px)*al,ky=r.py+(r.y-r.py)*al,cx=kx-ch*FPS_BACK,cy=ky-sh*FPS_BACK;
+ const f=Math.max(W,H*1.4)*.5,hor=H*.4;
+ let ox=0,oy=0;if(r.shake>0&&!RM){ox=(Math.random()-.5)*12*r.shake;oy=(Math.random()-.5)*12*r.shake;}
+ drawSky(r,T,yaw,f,hor+oy,kh);
+ const pj=(x,y,h)=>{const dx=x-cx,dy=y-cy,z=dx*ch+dy*sh;if(z<FPS_NEAR)return null;return [W/2+ox+(-dx*sh+dy*ch)/z*f,hor+oy+(FPS_CAMH-h)/z*f,z];};
+ if(settings.sky!=='off'){// synthwave ground grid, fixed to the world so it streams past
+  const GS=180,RG=1700;ctx.beginPath();
+  const seg=(x1,y1,x2,y2)=>{let a={x:x1,y:y1},b={x:x2,y:y2};const za=(a.x-cx)*ch+(a.y-cy)*sh,zb=(b.x-cx)*ch+(b.y-cy)*sh;if(za<FPS_NEAR&&zb<FPS_NEAR)return;
+   if(za<FPS_NEAR||zb<FPS_NEAR){const t=(FPS_NEAR+.5-za)/(zb-za),m={x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t};if(za<FPS_NEAR)a=m;else b=m;}
+   const p=pj(a.x,a.y,0),q=pj(b.x,b.y,0);if(p&&q){ctx.moveTo(p[0],p[1]);ctx.lineTo(q[0],q[1]);}};
+  const gx0=Math.floor((cx-RG)/GS)*GS,gy0=Math.floor((cy-RG)/GS)*GS;
+  for(let g=gx0;g<=cx+RG;g+=GS)seg(g,cy-RG,g,cy+RG);for(let g=gy0;g<=cy+RG;g+=GS)seg(cx-RG,g,cx+RG,g);
+  ctx.strokeStyle=settings.sky==='sunset'?'rgba(255,61,240,.5)':'rgba(56,214,255,.28)';ctx.lineWidth=1.5;ctx.stroke();}
+ const N=T.N,L0=[],R0=[],L1=[],R1=[],RL=[],ids=[];let started=false;
+ for(let o=-14;o<=FPS_AHEAD;o++){const i=(r.idx+o+N)%N,nx=T.nx[i],ny=T.ny[i],P=T.P[i];
+  const a=pj(P.x-nx*HW,P.y-ny*HW,0),b=pj(P.x+nx*HW,P.y+ny*HW,0);
+  if(!a||!b){if(started)break;continue;}started=true;
+  L0.push(a);R0.push(b);L1.push(pj(P.x-nx*HW,P.y-ny*HW,FPS_WALL));R1.push(pj(P.x+nx*HW,P.y+ny*HW,FPS_WALL));RL.push(pj(T.LX[i],T.LY[i],0));ids.push(i);}
+ const n=L0.length,poly2=(A,B)=>{ctx.beginPath();ctx.moveTo(A[0][0],A[0][1]);for(let k=1;k<A.length;k++)ctx.lineTo(A[k][0],A[k][1]);for(let k=B.length-1;k>=0;k--)ctx.lineTo(B[k][0],B[k][1]);ctx.closePath();};
+ const pline=(A,c,w)=>{ctx.beginPath();ctx.moveTo(A[0][0],A[0][1]);for(let k=1;k<A.length;k++)ctx.lineTo(A[k][0],A[k][1]);ctx.strokeStyle=c;ctx.lineWidth=w;ctx.stroke();};
+ if(n>1){
+  poly2(L0,R0);ctx.fillStyle='#07050d';ctx.fill();
+  // start line
+  const k0=ids.indexOf(0);if(k0>=0&&k0+1<n)for(let q=0;q<6;q++){const t0=q/6,t1=(q+1)/6,m=(A,B,t)=>[A[0]+(B[0]-A[0])*t,A[1]+(B[1]-A[1])*t];
+   ctx.beginPath();const p1=m(L0[k0],R0[k0],t0),p2=m(L0[k0],R0[k0],t1),p3=m(L0[k0+1],R0[k0+1],t1),p4=m(L0[k0+1],R0[k0+1],t0);ctx.moveTo(p1[0],p1[1]);ctx.lineTo(p2[0],p2[1]);ctx.lineTo(p3[0],p3[1]);ctx.lineTo(p4[0],p4[1]);ctx.closePath();ctx.fillStyle=q%2?'#fff':'#222';ctx.fill();}
+  // racing line, dashed in world space
+  ctx.beginPath();for(let k=0;k+2<n;k+=4){ctx.moveTo(RL[k][0],RL[k][1]);ctx.lineTo(RL[k+1][0],RL[k+1][1]);ctx.lineTo(RL[k+2][0],RL[k+2][1]);}
+  ctx.strokeStyle=hsl(kh,100,72,.25+.45*r.onLine);ctx.lineWidth=3;ctx.lineCap='round';ctx.stroke();
+  // apex dots
+  for(const ap of T.apex){const k=ids.indexOf(ap.i);if(k<0)continue;const P=T.P[ap.i],p=pj(P.x+T.nx[ap.i]*ap.s*(HW-12),P.y+T.ny[ap.i]*ap.s*(HW-12),2);if(!p)continue;
+   const hit=r.apexHit.has(ap.i);ctx.fillStyle=hit?'#fff':hsl(kh,100,65,.5+.4*A.pulse);ctx.beginPath();ctx.arc(p[0],p[1],Math.max(2,(hit?7:5)/p[2]*f),0,TAU);ctx.fill();}
+  // walls
+  ctx.fillStyle=hsl(T.hue,90,22,.85);poly2(L0,L1);ctx.fill();poly2(R0,R1);ctx.fill();
+  const ec=hsl(T.hue,100,62);pline(L0,ec,3);pline(R0,ec,3);pline(L1,hsl(T.hue,100,72),2);pline(R1,hsl(T.hue,100,72),2);ctx.lineCap='butt';
+ }
+ // fog: the far end of the road fades into the horizon
+ const fg=ctx.createLinearGradient(0,hor+oy,0,hor+oy+H*.08);fg.addColorStop(0,GROUND[settings.sky]||GROUND.off);fg.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=fg;ctx.fillRect(0,hor+oy,W,H*.08);
+ if(r.bot)kart3D(pj,f,r.bot.x,r.bot.y,r.bot.h,(T.hue+90)%360);
+ if(r.boost>0){ctx.globalCompositeOperation='lighter';ctx.fillStyle=hsl(kh,100,60,.12*Math.min(1,r.boost*2));ctx.fillRect(0,0,W,H);ctx.globalCompositeOperation='source-over';}
+ drawCockpit(r,kh,dt);
+}
+// 3D kart for the first-person view: faces in kart space [forward, left-right, height], painter-sorted
+function boxFaces(f0,f1,l0,l1,h0,h1,kind){const c=(a,b,h)=>[a,b,h];return[
+ [[c(f0,l0,h1),c(f1,l0,h1),c(f1,l1,h1),c(f0,l1,h1)],'top'],[[c(f0,l0,h0),c(f1,l0,h0),c(f1,l0,h1),c(f0,l0,h1)],kind],[[c(f0,l1,h0),c(f1,l1,h0),c(f1,l1,h1),c(f0,l1,h1)],kind],
+ [[c(f0,l0,h0),c(f0,l1,h0),c(f0,l1,h1),c(f0,l0,h1)],kind==='hull'?'rear':kind],[[c(f1,l0,h0),c(f1,l1,h0),c(f1,l1,h1),c(f1,l0,h1)],kind]];}
+const KART3D=(()=>{const F=[];
+ const lo=[[-13,-7],[9,-7],[15,-3],[15,3],[9,7],[-13,7]],hi=lo.map(([a,b])=>[a,b*.75]);
+ F.push([hi.map(([a,b])=>[a,b,6]),'top']);
+ for(let k=0;k<6;k++){const j=(k+1)%6;F.push([[[...lo[k],2],[...lo[j],2],[...hi[j],6],[...hi[k],6]],k===5?'rear':'hull']);}
+ for(const [fw,sd,ln] of [[8,-1,7],[8,1,7],[-9,-1,9],[-9,1,9]])F.push(...boxFaces(fw-ln/2,fw+ln/2,sd>0?7.5:-11.5,sd>0?11.5:-7.5,0,6,'wheel'));
+ F.push(...boxFaces(-7,0,-3.5,3.5,6,9,'seat'));
+ F.push(...boxFaces(-16,-13,-8,8,9,11,'wing'));
+ return F;})();
+function kart3D(pj,f,x,y,h,hue){
+ const c=Math.cos(h),s=Math.sin(h),W3=(a,b,hh)=>pj(x+a*c-b*s,y+a*s+b*c,hh);
+ const g=[[-17,-12],[17,-12],[17,12],[-17,12]].map(([a,b])=>W3(a,b,.2));if(g.some(p=>!p))return;
+ ctx.globalCompositeOperation='lighter';ctx.fillStyle=hsl(hue,100,60,.3);ctx.beginPath();g.forEach((p,k)=>k?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();ctx.fill();ctx.globalCompositeOperation='source-over';
+ const faces=[];for(const [pts,kind] of KART3D){const q=pts.map(([a,b,hh])=>W3(a,b,hh));if(q.some(p=>!p))return;faces.push([q,kind,q.reduce((m,p)=>m+p[2],0)/q.length]);}
+ faces.sort((A,B)=>B[2]-A[2]);
+ const lw=clamp(f/faces[0][2]*1.1,1,3),edge=hsl(hue,100,65);
+ for(const [q,kind] of faces){ctx.beginPath();q.forEach((p,k)=>k?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();
+  ctx.fillStyle=kind==='top'?hsl(hue,50,13):kind==='wheel'?'#050308':kind==='rear'?'#1a0610':'#0b0614';ctx.fill();ctx.strokeStyle=kind==='wheel'?hsl(hue,100,65,.6):edge;ctx.lineWidth=lw;ctx.stroke();}
+ // tail lights and helmet
+ for(const sd of [-1,1]){const p=W3(-13.3,sd*5,4);if(p){const rr=Math.max(1.5,1.6/p[2]*f);ctx.fillStyle='#ff2a55';ctx.beginPath();ctx.arc(p[0],p[1],rr,0,TAU);ctx.fill();}}
+ const hp=W3(-3.5,0,12.5);if(hp){const rr=Math.max(2,3.6/hp[2]*f);ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(hp[0],hp[1],rr,0,TAU);ctx.fill();ctx.strokeStyle=edge;ctx.lineWidth=lw;ctx.stroke();ctx.fillStyle=hsl(hue,100,55);ctx.fillRect(hp[0]-rr*.8,hp[1]-rr*.2,rr*1.6,rr*.45);}
+}
+const GROUND={cyber:'#06030f',sunset:'#14041f',off:hsl(0,0,3)};
+const hash=n=>{const v=Math.sin(n*127.1+311.7)*43758.5453;return v-Math.floor(v);};
+// sky behind the first-person view. Everything sits at a fixed compass angle, so it pans as the kart turns.
+function drawSky(r,T,yaw,f,hor,kh){
+ const sky=settings.sky,top=0;
+ if(sky==='off'||!SKIES.includes(sky)){ctx.save();ctx.beginPath();ctx.rect(0,0,W,hor);ctx.clip();stripes(W/2,hor,G.t*(RM?.03:.1*(1+r.F*2)),T.hue,A.pulse);ctx.restore();ctx.fillStyle=hsl(T.hue,50,5);ctx.fillRect(0,hor,W,H);return;}
+ const g=ctx.createLinearGradient(0,top,0,hor);
+ if(sky==='sunset'){g.addColorStop(0,'#14052b');g.addColorStop(.55,'#6d1663');g.addColorStop(1,'#ff6a3d');}
+ else{g.addColorStop(0,'#03020a');g.addColorStop(.65,'#170a33');g.addColorStop(1,'#3d0f5e');}
+ ctx.fillStyle=g;ctx.fillRect(0,top,W,hor);
+ const ax=a=>W/2+(a-yaw)*f;              // screen x of compass angle a
+ const vis=(n,fn)=>{const a0=yaw-W/2/f,a1=yaw+W/2/f,st=TAU/n;for(let b=Math.floor(a0/st)-1;b<=Math.ceil(a1/st);b++)fn(b,((b%n)+n)%n,st);};
+ if(sky==='sunset'){
+  // striped sun, drifting gently with the turn so it stays on screen
+  const sr=Math.min(W,H)*.2,sx=W/2+Math.sin(yaw)*W*.22,sy=hor-sr*.15;
+  ctx.save();ctx.beginPath();ctx.arc(sx,sy,sr,0,TAU);ctx.clip();
+  const sg=ctx.createLinearGradient(0,sy-sr,0,sy+sr);sg.addColorStop(0,'#ffe45c');sg.addColorStop(.6,'#ff4f8b');sg.addColorStop(1,'#c21d9a');ctx.fillStyle=sg;ctx.fillRect(sx-sr,sy-sr,sr*2,sr*2);
+  ctx.fillStyle='#6d1663';for(let k=0;k<7;k++){const yy=sy-sr*.45+k*sr*.13,hh=1.5+k*1.5;ctx.fillRect(sx-sr,yy,sr*2,hh);}
+  ctx.restore();
+  // wireframe mountains
+  ctx.beginPath();ctx.moveTo(0,hor);for(let x=0;x<=W+8;x+=8){const a=yaw+(x-W/2)/f,h=H*.07*(1+.55*Math.sin(3*a)+.3*Math.sin(7*a+1)+.18*Math.sin(17*a+2));ctx.lineTo(x,hor-Math.max(0,h));}
+  ctx.lineTo(W,hor);ctx.closePath();ctx.fillStyle='#160424';ctx.fill();ctx.strokeStyle='#ff3df0';ctx.lineWidth=2;ctx.stroke();
+ }else{
+  // far skyline
+  ctx.fillStyle='#120828';vis(90,(b,k,st)=>{const h=H*(.06+.12*hash(k));ctx.fillRect(ax(b*st),hor-h,st*f*.9,h);});
+  // near skyline with lit windows and neon signs
+  vis(46,(b,k,st)=>{const h=H*(.09+.2*hash(k+50)),x0=ax(b*st),w=st*f*.8;ctx.fillStyle='#07040f';ctx.fillRect(x0,hor-h,w,h);
+   ctx.fillStyle='rgba(255,225,140,.55)';for(let row=0;row<7;row++){const yy=hor-h+8+row*h/8;if(yy>hor-6)break;for(let c=0;c<3;c++)if(hash(k*31+row*7+c)>.62)ctx.fillRect(x0+w*(.15+c*.28),yy,w*.12,3);}
+   if(hash(k+99)>.7){ctx.fillStyle=hash(k+7)>.5?'#ff3df0':'#38d6ff';ctx.fillRect(x0+w*.8,hor-h*.85,3,h*.4);}});
+ }
+ ctx.fillStyle=hsl(kh,100,65,.7);ctx.fillRect(0,hor-1.5,W,3);
+}
+// cockpit: low neon dashboard and a butterfly yoke that follows steering and drift
+function drawCockpit(r,kh,dt){
+ const c=r.drift&&r.lvl?[0,195,30,300][r.lvl]:kh,glow=hsl(c,100,62),dh=Math.min(H*.2,W*.14);
+ r.wheel=(r.wheel||0)+((r.st||0)*.5+(r.drift?r.beta*.6:0)-(r.wheel||0))*Math.min(1,dt*10);
+ ctx.beginPath();ctx.moveTo(0,H);ctx.lineTo(0,H-dh*.5);ctx.lineTo(W*.28,H-dh*.78);ctx.lineTo(W*.36,H-dh);ctx.lineTo(W*.64,H-dh);ctx.lineTo(W*.72,H-dh*.78);ctx.lineTo(W,H-dh*.5);ctx.lineTo(W,H);ctx.closePath();
+ ctx.fillStyle='#07040d';ctx.fill();ctx.lineWidth=3;ctx.strokeStyle=glow;ctx.stroke();
+ ctx.beginPath();ctx.moveTo(W*.37,H-dh*.86);ctx.lineTo(W*.63,H-dh*.86);ctx.strokeStyle=hsl(c,100,62,.35);ctx.lineWidth=2;ctx.stroke();
+ ctx.strokeStyle=hsl(c,100,62,.45);ctx.lineWidth=2;for(let k=0;k<4;k++){const x=W*.05+k*W*.035;ctx.beginPath();ctx.moveTo(x,H-dh*.32);ctx.lineTo(x+W*.02,H-dh*.5);ctx.stroke();ctx.beginPath();ctx.moveTo(W-x,H-dh*.32);ctx.lineTo(W-x-W*.02,H-dh*.5);ctx.stroke();}
+ const R0=Math.min(W*.22,H*.32);ctx.save();ctx.translate(W/2,H-dh*.2);ctx.rotate(r.wheel);
+ ctx.beginPath();ctx.moveTo(-R0,-R0*.75);ctx.lineTo(-R0,-R0*.1);ctx.lineTo(-R0*.55,R0*.3);ctx.lineTo(R0*.55,R0*.3);ctx.lineTo(R0,-R0*.1);ctx.lineTo(R0,-R0*.75);
+ ctx.lineJoin='round';ctx.lineCap='round';ctx.strokeStyle='#0b0614';ctx.lineWidth=R0*.2;ctx.stroke();ctx.strokeStyle=glow;ctx.lineWidth=3;ctx.stroke();ctx.lineJoin='miter';ctx.lineCap='butt';
+ ctx.fillStyle='#fff';ctx.fillRect(-2,-R0*.12,4,R0*.18);ctx.restore();
+}
+function renderRace(dt){
+ const r=R,T=r.T,u=uiU(),spd=Math.hypot(r.vx,r.vy),kh=(T.hue+180)%360;
+ if(settings.view==='fps'){renderFPS(r,T,kh,dt);if(r.flash>0){ctx.fillStyle=`rgba(255,40,80,${r.flash*.35})`;ctx.fillRect(0,0,W,H);}hudRace(u,spd,kh);return;}
+ const zoom=Math.min(W,H)/500*(1-.38*clamp(spd/1000,0,1)),sx=W/2,sy=H*(W>H?.74:.78);
+ let ox=0,oy=0;if(r.shake>0&&!RM){ox=(Math.random()-.5)*14*r.shake;oy=(Math.random()-.5)*14*r.shake;}
+ stripes(sx,sy,-r.camA+G.t*(RM?.03:.12*(1+r.F*2)),T.hue,A.pulse);
+ ctx.save();ctx.translate(sx+ox,sy+oy);ctx.scale(zoom,zoom);ctx.rotate(-r.camA-Math.PI/2);ctx.translate(-r.camX,-r.camY);
+ strokeTrack(T,HW*2+40,HW*2+8,HW*2-2,T.hue,A.pulse);
+ ctx.setLineDash([26,44]);ctx.strokeStyle=hsl(T.hue,60,70,.12);ctx.lineWidth=3;ctx.stroke(T.path);ctx.setLineDash([]);
+ drawStartLine(T,10);
+ ctx.setLineDash([18,16]);ctx.lineCap='round';ctx.strokeStyle=hsl(kh,100,72,.16+.4*r.onLine);ctx.lineWidth=4;ctx.stroke(T.linePath);ctx.setLineDash([]);ctx.lineCap='butt';
+ for(const ap of T.apex){const P=T.P[ap.i],px=P.x+T.nx[ap.i]*ap.s*(HW-12),py=P.y+T.ny[ap.i]*ap.s*(HW-12),hit=r.apexHit.has(ap.i);
+  ctx.fillStyle=hit?'#fff':hsl(kh,100,65,.35+.4*A.pulse);ctx.beginPath();ctx.arc(px,py,hit?6:4.5,0,TAU);ctx.fill();}
+ ctx.globalCompositeOperation='lighter';
+ const tr=r.trail,n=Math.min(tr.length,40+Math.floor(r.F*170));
+ ctx.lineCap='round';ctx.lineWidth=5;
+ for(let seg=0;seg<n-1;seg+=6){const s0=tr.length-1-seg;if(s0<1)break;ctx.strokeStyle=hsl(kh,100,60,(1-seg/n)*.6);ctx.beginPath();ctx.moveTo(tr[s0].x,tr[s0].y);for(let j=1;j<=6&&s0-j>=0;j++)ctx.lineTo(tr[s0-j].x,tr[s0-j].y);ctx.stroke();}
+ for(const p of r.parts){ctx.globalAlpha=p.life/p.max;ctx.fillStyle=p.c;ctx.fillRect(p.x-p.s/2,p.y-p.s/2,p.s,p.s);}
+ ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+ if(r.bot)drawKart(r.bot.x,r.bot.y,r.bot.h,(T.hue+90)%360,1,0);
+ drawKart(r.x,r.y,r.h,r.drift&&r.lvl?[0,195,30,300][r.lvl]:kh,1,r.boost>0?Math.min(1,r.boost*1.5):0);
+ ctx.restore();
+ if(r.flash>0){ctx.fillStyle=`rgba(255,40,80,${r.flash*.35})`;ctx.fillRect(0,0,W,H);}
+ hudRace(u,spd,kh);
+}
+function hudRace(u,spd,kh){
+ const r=R,T=r.T;
+ // top-right: lap, current lap time, best lap
+ const right=W-INS.r-14*u,top=INS.t+12*u,s1=30*u,s2=20*u,s3=14*u;
+ const pos=!r.bot?0:r.phase==='finish'?r.place:(r.bot.done||r.bot.s>r.prog?2:1);
+ const lapTxt=(pos?'P'+pos+'  ':'')+'LAP '+Math.min(r.lapsDone+1,LAPS)+'/'+LAPS;
+ const cur=r.phase==='count'?0:r.phase==='finish'?r.total:r.time-r.lapStart;
+ const curTxt=r.phase==='finish'?'TOTAL '+fmt(cur):fmt(cur),bestTxt='BEST '+fmt(r.best);
+ const bw=Math.max(tw(lapTxt,s1),tw(curTxt,s2),tw(bestTxt,s3))+30*u,bh=s1+s2+s3+30*u;
+ slab(right-bw,top,bw,bh,18*u,'l','rgba(0,0,0,.8)');
+ txt(lapTxt,right-12*u,top+9*u+s1/2,s1,'right','#fff');
+ txt(curTxt,right-12*u,top+15*u+s1+s2/2,s2,'right',hsl(T.hue,100,72));
+ txt(bestTxt,right-12*u,top+20*u+s1+s2+s3/2,s3,'right','rgba(255,255,255,.7)');
+ // top-left: pause
+ const pb=46*u;
+ button(INS.l+12*u,top,pb,pb,'',()=>{G.overlay='pause';},{slant:10*u});
+ ctx.fillStyle='#fff';ctx.fillRect(INS.l+12*u+pb/2-7*u,top+pb/2-9*u,5*u,18*u);ctx.fillRect(INS.l+12*u+pb/2+3*u,top+pb/2-9*u,5*u,18*u);
+ // bottom centre: flow + speed + drift charge
+ const bwid=Math.min(W*.46,300*u),bx=W/2-bwid/2,byy=H-INS.b-26*u;
+ slab(bx-12*u,byy-30*u,bwid+24*u,44*u,10*u,'r','rgba(0,0,0,.65)');
+ txt('FLOW x'+(1+FLOW_GAIN*r.F).toFixed(2),bx,byy-15*u,13*u,'left','#fff');
+ txt(Math.round(spd*.22)+' KM/H',bx+bwid,byy-15*u,13*u,'right','rgba(255,255,255,.75)');
+ ctx.fillStyle='rgba(255,255,255,.14)';ctx.fillRect(bx,byy,bwid,6*u);ctx.fillStyle=hsl(kh,100,62);ctx.fillRect(bx,byy,bwid*r.F,6*u);
+ {const n=Math.round(1/ASSIST_STEP),lv=Math.round(r.assist/ASSIST_STEP),pw=12*u;txt('ASSIST',bx-12*u,byy-44*u,11*u,'left',r.assistOn>.5?hsl(T.hue+180,100,75):'rgba(255,255,255,.55)');
+  for(let i=0;i<n;i++)slab(bx+44*u+i*(pw+5*u),byy-48*u,pw,8*u,4*u,'r',i<lv?hsl(T.hue+180,100,65,.5+.5*r.assistOn):'rgba(255,255,255,.18)');}
+ if(r.drift){const pw=26*u;for(let i=1;i<=3;i++){const px=W/2+(i-2)*(pw+8*u)-pw/2,py=byy-52*u;slab(px,py,pw,10*u,5*u,'r',r.lvl>=i?LVLC[i]:'rgba(255,255,255,.18)');}}
+ // touch feedback
+ for(const sd of [-1,1]){if(!(sd<0?ptr.left:ptr.right))continue;const ex=sd<0?INS.l+18*u:W-INS.r-18*u,cy=H*.55,c=r.drift&&r.dDir===sd?LVLC[r.lvl]:'rgba(255,255,255,.4)';
+  ctx.strokeStyle=c;ctx.lineWidth=5*u;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(ex-sd*14*u,cy-22*u);ctx.lineTo(ex,cy);ctx.lineTo(ex-sd*14*u,cy+22*u);ctx.stroke();ctx.lineCap='butt';
+  if(r.drift&&r.dDir===sd)txt('DRIFT',ex-sd*30*u,cy-38*u,12*u,'center','rgba(255,255,255,.75)');}
+ // guides at the start
+ if(r.phase==='count'||(r.lapsDone===0&&r.time<3)){const al=r.phase==='count'?.85:Math.max(0,1-r.time/3)*.85;
+  ctx.strokeStyle=`rgba(255,255,255,${al*.25})`;ctx.setLineDash([8,10]);ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(W/2,H*.3);ctx.lineTo(W/2,H*.86);ctx.stroke();ctx.setLineDash([]);
+  const gs=fit('HOLD LONGER = DRIFT',14*u,W*.42);
+  txt('TAP = LEFT',W*.25,H*.6,gs,'center',`rgba(255,255,255,${al})`);txt('HOLD LONGER = DRIFT',W*.25,H*.6+20*u,gs,'center',`rgba(255,255,255,${al})`);
+  txt('TAP = RIGHT',W*.75,H*.6,gs,'center',`rgba(255,255,255,${al})`);txt('LET GO = BOOST',W*.75,H*.6+20*u,gs,'center',`rgba(255,255,255,${al})`);
+  txt('KEYS: A D / ← →',W/2,H*.6+50*u,fit('KEYS: A D / ← →',11*u,W-40),'center',`rgba(255,255,255,${al*.6})`);}
+ // countdown
+ if(r.phase==='count'){const nn=Math.ceil(r.count);if(nn<=3&&nn>0){const fr=nn-r.count,sz=96*u*(1.25-.25*fr);txt(String(nn),W/2,H*.34,sz,'center',`rgba(255,255,255,${1-fr*.6})`,hsl(T.hue,100,45));}}
+ // popups
+ let py=H*.28;for(const p of r.pops){const k=p.life/p.max,sz=(p.text==='GO!'?72:24)*u;ctx.globalAlpha=Math.min(1,k*2);txt(p.text,W/2,py-(1-k)*30*u,sz,'center',p.c,'rgba(0,0,0,.8)');ctx.globalAlpha=1;py+=sz*1.1;}
+}
+const SKIES=['cyber','sunset','off'],SKYN={cyber:'CYBER CITY',sunset:'SUNSET',off:'CLASSIC'};
+function viewRow(bx,y,bw,bh,u){const half=(bw-12*u)/2,save=()=>store.set('settings',settings);
+ button(bx,y,half,bh,'VIEW: '+(settings.view==='fps'?'FPS':'TOP'),()=>{settings.view=settings.view==='fps'?'top':'fps';save();},{size:fit('VIEW: FPS',15*u,half-24*u)});
+ button(bx+half+12*u,y,half,bh,SKYN[settings.sky]||'CLASSIC',()=>{settings.sky=SKIES[(SKIES.indexOf(settings.sky)+1)%SKIES.length];save();},{size:fit('CYBER CITY',15*u,half-24*u)});}
+function overlayPanel(title,hue){ctx.fillStyle='rgba(4,2,8,.74)';ctx.fillRect(0,0,W,H);const u=uiU(),ts=Math.min(40*u,W*.09),tW=tw(title,ts);const y=H*.2;slab(W/2-tW/2-30*u,y-ts*.7,tW+60*u,ts*1.4,ts*.4,'r','rgba(0,0,0,.9)');txt(title,W/2+ts*.2,y+1,ts,'center','#fff',hsl(hue,100,45));return y+ts*1.2;}
+function renderOverlay(){
+ G.drawOv=true;const u=uiU(),bw=Math.min(W-60,340*u),bh=48*u,gap=12*u,bx=W/2-bw/2,o=G.overlay;
+ const hue=G.state==='race'&&R?R.T.hue:(G.state==='select'&&TRACKS[G.sel]?TRACKS[G.sel].hue:(G.t*14)%360);
+ if(o==='settings'){let y=overlayPanel('SETTINGS',hue)+20*u;viewRow(bx,y,bw,bh,u);y+=bh+gap;
+  button(bx,y,bw,bh,'ENGINE + FX: '+(settings.sfx?'ON':'OFF'),()=>{settings.sfx=!settings.sfx;store.set('settings',settings);applySettings();},{size:17*u,stroke:settings.sfx?hsl(hue,100,62):null});y+=bh+gap*2;
+  button(bx,y,bw,bh,'BACK',()=>{G.overlay=null;},{size:17*u});}
+ else if(o==='leaderboard'){let y=overlayPanel('LEADERBOARD',hue)+16*u;
+  button(bx,y,bw,bh,'GOOGLE PLAY GAMES',()=>toast('COMING IN THE FINAL VERSION'),{size:fit('GOOGLE PLAY GAMES',16*u,bw-30*u)});y+=bh+gap;
+  button(bx,y,bw,bh,'GAME CENTER (iOS)',()=>toast('COMING IN THE FINAL VERSION'),{size:fit('GAME CENTER (iOS)',16*u,bw-30*u)});y+=bh+gap*1.6;
+  txt('YOUR RECORDS',W/2,y,13*u,'center',hsl(hue,100,75));y+=22*u;
+  for(const T of TRACKS){const rc=records[T.id]||{};txt(T.name,bx+8*u,y,14*u,'left','#fff');txt(fmt(rc.lap),bx+bw-8*u,y,14*u,'right','rgba(255,255,255,.8)');y+=24*u;}
+  y+=gap;button(bx,y,bw,bh,'BACK',()=>{G.overlay=null;},{size:17*u});}
+ else if(o==='pause'){let y=overlayPanel('PAUSED',hue)+16*u;
+  button(bx,y,bw,bh,'RESUME',()=>{G.overlay=null;},{size:17*u});y+=bh+gap;
+  button(bx,y,bw,bh,'RESTART',()=>startRace(R.ti),{size:17*u});y+=bh+gap;
+  viewRow(bx,y,bw,bh,u);y+=bh+gap;
+  button(bx,y,bw,bh,'RETURN TO MENU',()=>{G.state='select';G.overlay=null;},{size:17*u});}
+ else if(o==='finish'){const r=R;let y=overlayPanel('FINISH',hue)+18*u;
+  if(r.bot){const win=r.place===1,gap=!win&&r.bot.total!=null?'  +'+(r.total-r.bot.total).toFixed(2)+'s':'';txt(win?'YOU BEAT THE BOT':'BOT WINS'+gap,W/2,y,20*u,'center',win?'#ffd23d':'#ff4d6d');y+=30*u;}
+ txt('TOTAL  '+fmt(r.total),W/2,y,24*u,'center','#fff');y+=26*u;
+  if(r.newTotal){txt('NEW RECORD',W/2,y,14*u,'center','#ffd23d');}y+=24*u;
+  const bl=Math.min(...r.laps);txt('BEST LAP  '+fmt(bl)+(r.newLap?'  ★':''),W/2,y,17*u,'center',hsl(hue,100,75));y+=26*u;
+  const lt=r.laps.map((l,i)=>'L'+(i+1)+' '+fmt(l)).join('   ');txt(lt,W/2,y,fit(lt,12*u,W-40),'center','rgba(255,255,255,.6)');y+=30*u;
+  button(bx,y,bw,bh,'RACE AGAIN',()=>startRace(r.ti),{size:17*u,stroke:hsl(hue,100,62)});y+=bh+gap;
+  button(bx,y,bw,bh,'RETURN TO MENU',()=>{G.state='select';G.overlay=null;},{size:17*u});}
+ G.drawOv=false;
+}
+function render(dt){
+ ctx.setTransform(DPR,0,0,DPR,0,0);UI.length=0;
+ A.pulse=Math.pow(1-((G.t*2)%1),4)*(RM?.3:1);
+ ctx.fillStyle='#07040d';ctx.fillRect(0,0,W,H);
+ if(G.state==='title')renderTitle();else if(G.state==='select')renderSelect(dt);else if(G.state==='race'&&R)renderRace(dt);
+ if(G.overlay)renderOverlay();
+ if(G.toast){const u=uiU(),s=14*u,w=tw(G.toast.text,s)+40*u,y=H-INS.b-80*u;ctx.globalAlpha=Math.min(1,G.toast.life*2);slab(W/2-w/2,y-18*u,w,36*u,10*u,'r','rgba(0,0,0,.9)');txt(G.toast.text,W/2+5*u,y,s,'center','#fff');ctx.globalAlpha=1;G.toast.life-=dt;if(G.toast.life<=0)G.toast=null;}
+}
+
+// ---------- input ----------
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+cv.addEventListener('pointerdown',e=>{
+ e.preventDefault();initAudio();try{cv.setPointerCapture(e.pointerId);}catch(_){}
+ const x=e.clientX,y=e.clientY;
+ for(let i=UI.length-1;i>=0;i--){const b=UI[i];if(G.overlay&&!b.ov)continue;if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h){sClick();b.fn();return;}}
+ if(G.overlay)return;
+ if(G.state==='title'){sClick();goSelect();return;}
+ if(G.state==='select'){G.swipe={id:e.pointerId,x0:x,y0:y};return;}
+ if(G.state==='race'){if(x<W/2){if(!ptr.left)ptr.left={id:e.pointerId,ox:x,oy:y,x,y};}else if(!ptr.right)ptr.right={id:e.pointerId,x,y};}
+});
+cv.addEventListener('pointermove',e=>{
+ const x=e.clientX,y=e.clientY;
+ if(ptr.right&&e.pointerId===ptr.right.id){ptr.right.x=x;ptr.right.y=y;}
+});
+function release(e){
+ if(ptr.left&&e.pointerId===ptr.left.id)ptr.left=null;
+ if(ptr.right&&e.pointerId===ptr.right.id)ptr.right=null;
+ if(G.swipe&&e.pointerId===G.swipe.id&&G.state==='select'&&!G.overlay){const dx=e.clientX-G.swipe.x0,dy=e.clientY-G.swipe.y0;G.swipe=null;
+  if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy))changeSel(dx<0?1:-1);else if(Math.abs(dx)<14&&Math.abs(dy)<14){sClick();tryStart();}}
+}
+cv.addEventListener('pointerup',release);cv.addEventListener('pointercancel',release);
+window.addEventListener('keydown',e=>{
+ const k=e.key,kl=k.toLowerCase();if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(kl))e.preventDefault();
+ if(e.repeat){keys.add(kl);return;}
+ initAudio();keys.add(kl);
+ if(kl==='escape'||kl==='p'){if(G.overlay&&G.overlay!=='finish')G.overlay=null;else if(G.state==='race'&&!G.overlay)G.overlay='pause';else if(G.state==='select')G.state='title';return;}
+ if(G.overlay){if(G.overlay==='finish'&&kl==='enter')startRace(R.ti);return;}
+ if(G.state==='title'&&(kl==='enter'||kl===' '))goSelect();
+ else if(G.state==='select'){if(kl==='arrowleft')changeSel(-1);else if(kl==='arrowright')changeSel(1);else if(kl==='enter'||kl===' ')tryStart();}
+});
+window.addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
+// Android back button (called by the app wrapper): steps back one screen, 'exit' on the title screen
+window.__gkBack=()=>{if(G.overlay&&G.overlay!=='finish'){G.overlay=null;return 'ok';}if(G.state==='race'){if(!G.overlay)G.overlay='pause';else{G.state='select';G.overlay=null;}return 'ok';}if(G.state==='select'){G.state='title';return 'ok';}return 'exit';};
+window.addEventListener('blur',()=>{keys.clear();ptr.left=ptr.right=null;});
+window.__gkPause=()=>{keys.clear();ptr.left=ptr.right=null;if(A.C&&A.C.state==='running')A.C.suspend();if(G.state==='race'&&R&&R.phase!=='finish'&&!G.overlay)G.overlay='pause';};
+document.addEventListener('visibilitychange',()=>{if(document.hidden)window.__gkPause();});
+
+// ---------- loop: physics fixed at 120 Hz, drawing at the display rate ----------
+let last=performance.now(),acc=0;
+function frame(now){
+ requestAnimationFrame(frame);
+ let dt=(now-last)/1000;last=now;if(dt>.1)dt=.1;if(dt<0)dt=0;G.t+=dt;
+ if(G.state==='race'&&R&&(!G.overlay||G.overlay==='finish')){acc+=dt;while(acc>=DT){stepRace(DT);acc-=DT;}G.alpha=acc/DT;if(R.phase==='finish'&&R.fin>1.2&&!G.overlay)G.overlay='finish';}else acc=0;
+ if(A.C)engineTick(dt);
+ render(dt);
+}
+requestAnimationFrame(frame);
+})();
+</script>
