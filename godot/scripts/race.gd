@@ -201,7 +201,9 @@ func step(dt: float, in_l: bool, in_r: bool) -> void:
 		_cam_follow(dt)
 		return
 	var throttle := 1.0; var s_in := in_st; var brk := in_br
-	sts += (s_in - sts) * minf(1, dt * 12); s_in = sts
+	# steering builds up while held (a tap is a nudge, a hold is full lock) and lets go quickly
+	var rate := 10.0 if absf(s_in) < absf(sts) or s_in * sts < 0 else 3.5
+	sts = move_toward(sts, s_in, rate * dt); s_in = sts
 	if phase == FINISH:
 		var des := (T.p[(idx + 14) % n] - pos).angle()
 		s_in = clampf(angle_difference(h, des) * 2.2, -1, 1)
@@ -233,7 +235,7 @@ func step(dt: float, in_l: bool, in_r: bool) -> void:
 		if L > lvl: lvl = L; events.append(["charge", L])
 	else:
 		# grip: the tyres cap how fast the kart can turn at speed, so tight corners need a drift
-		var want := s_in * 4.2 * clampf(.25 + spd / 170, 0, 1)
+		var want := s_in * 3.6 * clampf(.25 + spd / 170, 0, 1)
 		var cap := A_GRIP * (1 + LINE_GRIP * on_line + (.6 if wall_grip > 0 else 0.0)) / maxf(spd, 60)
 		wall_grip -= dt
 		h += clampf(want, -cap, cap) * dt
