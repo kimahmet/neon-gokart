@@ -5,7 +5,7 @@ extends SceneTree
 static func autopilot(r: Race) -> int:
 	var sp := r.vel.length()
 	var des := (r.T.line[(r.idx + 8 + int(sp / 50)) % r.T.n] - r.pos).angle()
-	var d := angle_difference(r.vel.angle() if sp > 40 else r.h, des)
+	var d := angle_difference((r.vel.angle() if sp > 40 else r.h) + r.sts * 0.15, des)
 	return 1 if d > .04 else -1 if d < -.04 else 0
 
 func check(ok: bool, what: String) -> void:

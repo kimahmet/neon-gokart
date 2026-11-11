@@ -202,7 +202,8 @@ func step(dt: float, in_l: bool, in_r: bool) -> void:
 		return
 	var throttle := 1.0; var s_in := in_st; var brk := in_br
 	# steering builds up while held (a tap is a nudge, a hold is full lock) and lets go quickly
-	var rate := 10.0 if absf(s_in) < absf(sts) or s_in * sts < 0 else 3.5
+	var tight := clampf(absf(T.lk[(idx + 12) % n]) * 400 - 1, 0, 1)   # a tight corner or chicane ahead: steering reacts faster
+	var rate := 10.0 if absf(s_in) < absf(sts) or s_in * sts < 0 else 3.5 + 4.5 * tight
 	sts = move_toward(sts, s_in, rate * dt); s_in = sts
 	if phase == FINISH:
 		var des := (T.p[(idx + 14) % n] - pos).angle()
@@ -245,6 +246,9 @@ func step(dt: float, in_l: bool, in_r: bool) -> void:
 		if throttle < .05: a -= 160
 		if brk: a -= BRAKE
 		if vf > vmax: a = minf(a, -(vf - vmax) * 1.2)
+		# no brake button: above the speed the racing line can carry into the next corner, ease off automatically
+		var safe := T.lv[idx] * 1.1
+		if phase == GO and vf > safe: a = minf(a, -minf(BRAKE * .7, (vf - safe) * 3))
 		if boost > 0: boost -= dt; a += 700
 		vf = maxf(0, vf + a * dt); vl *= exp(-9 * dt)
 		vel = g * vf + gl * vl

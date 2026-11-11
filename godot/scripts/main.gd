@@ -18,7 +18,7 @@ var records := {}
 var tracks: Array[Track] = []
 var race: Race
 var acc := 0.0
-var slowmo := 0.0             # a perfect apex freezes time for a blink
+var dirty := false            # records changed; written when the race stops, not on the lap line
 var in_l := false
 var in_r := false
 var world := World.new()
@@ -33,6 +33,7 @@ func _ready() -> void:
 	var win := get_window()
 	var dpr := clampf(DisplayServer.screen_get_scale(), 1, 3.5)
 	win.content_scale_factor = dpr
+	if OS.has_feature("mobile"): get_viewport().scaling_3d_scale = .75   # 3D at 75% resolution, HUD stays sharp
 	add_child(world); add_child(audio)
 	var layer := CanvasLayer.new(); add_child(layer)
 	hud.g = self; layer.add_child(hud)
@@ -61,6 +62,7 @@ func _load() -> void:
 
 
 func save() -> void:
+	dirty = false
 	if not demo.is_empty(): return
 	var f := FileAccess.open(SAVE, FileAccess.WRITE)
 	if f: f.store_string(JSON.stringify({"settings": settings, "records": records}))
@@ -127,17 +129,17 @@ func _notification(what: int) -> void:
 		NOTIFICATION_WM_GO_BACK_REQUEST: back()
 		NOTIFICATION_APPLICATION_PAUSED, NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT:
 			hud.release_all()
+			if dirty: save()
 			if state == "race" and race and race.phase != Race.FINISH and overlay == "" and demo.is_empty(): overlay = "pause"
 
 
 func _process(dt: float) -> void:
 	dt = minf(dt, .1); frame_dt = dt; t += dt
 	pulse = pow(1 - audio.beat(t), 4)
-	slowmo -= dt
 	slide *= exp(-dt * 10); toast_life -= dt
 	var racing := state == "race" and race != null
 	if racing and (overlay == "" or overlay == "finish"):
-		acc += dt * (.3 if slowmo > 0 else 1.0)
+		acc += dt
 		while acc >= Race.DT:
 			in_l = hud.touch_l >= 0 or Input.is_physical_key_pressed(KEY_LEFT) or Input.is_physical_key_pressed(KEY_A)
 			in_r = hud.touch_r >= 0 or Input.is_physical_key_pressed(KEY_RIGHT) or Input.is_physical_key_pressed(KEY_D)
@@ -145,13 +147,14 @@ func _process(dt: float) -> void:
 				var a := _autopilot(); in_l = a < 0; in_r = a > 0
 			race.step(Race.DT, in_l, in_r); acc -= Race.DT
 		for e in race.events:
-			if e[0] == "save": save()
-			elif e[0] == "perfect": slowmo = .15
+			if e[0] == "save": dirty = true
+			elif e[0] == "perfect": world.fov_kick = 9.0; hud.white = .3
 			else: audio.handle(e)
 		race.events.clear()
 		if race.phase == Race.FINISH and race.fin > 1.2 and overlay == "": overlay = "finish"
 	else:
 		acc = 0
+	if dirty and (overlay != "" or not racing): save()
 	audio.engine(dt, race if racing and overlay != "pause" else null)
 	audio.music_tick(dt, 0 if not racing else 2 if overlay == "pause" else 1, race)
 	world.visible = racing

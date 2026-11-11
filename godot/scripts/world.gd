@@ -43,6 +43,9 @@ var fov_kick := 0.0
 func _ready() -> void:
 	sky_mat.shader = SH_SKY
 	var sky := Sky.new(); sky.sky_material = sky_mat
+	# nothing reads the sky's reflection map, but its uniforms change every frame: keep that update tiny
+	sky.radiance_size = Sky.RADIANCE_SIZE_32; sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_DISABLED
 	env.background_mode = Environment.BG_SKY; env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_DISABLED
 	env.tonemap_mode = Environment.TONE_MAPPER_LINEAR

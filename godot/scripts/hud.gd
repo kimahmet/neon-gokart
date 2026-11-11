@@ -16,6 +16,7 @@ var draw_ov := false
 var touch_l := -1; var touch_r := -1   # finger index steering each side, -1 = none
 var swipe_id := -1; var swipe_from := Vector2.ZERO
 var wheel := 0.0
+var white := 0.0                  # perfect-apex flash
 var previews := {}                 # track id -> closed centreline for the select screen
 
 
@@ -234,6 +235,8 @@ func _race() -> void:
 		if r.boost > 0: draw_rect(Rect2(0, 0, W, H), U.hsl(kh, 100, 60, .1 * minf(1, r.boost * 2)))
 		_cockpit(r, kh)
 	if r.flash > 0: draw_rect(Rect2(0, 0, W, H), Color(1, .16, .31, r.flash * .35))
+	white = maxf(0, white - g.frame_dt * 2)
+	if white > 0: draw_rect(Rect2(0, 0, W, H), Color(1, 1, 1, white * .5))
 	# top-right: lap, current lap time, best lap
 	var right := W - ins_r - 14 * k; var top := ins_t + 12 * k; var s1 := 30 * k; var s2 := 20 * k; var s3 := 14 * k
 	var place := r.position()
