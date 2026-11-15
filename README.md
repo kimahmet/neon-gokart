@@ -2,6 +2,13 @@
 
 A neon, arcade drift racer for phones. One file of HTML5 canvas (`index.html`), wrapped as a tiny Android app.
 
+**Play in your browser:** https://kimahmet.github.io/neon-gokart/
+
+<p>
+  <img src="docs/tracks.jpg" alt="Track select screen showing the Monaco layout" width="300">
+  <img src="docs/race.jpg" alt="Top-down race view at the start line" width="300">
+</p>
+
 ## Play
 
 - **Left half of the screen:** steer left. **Right half:** steer right. Gas is automatic.
