@@ -39,16 +39,13 @@ Font: [Russo One](https://fonts.google.com/specimen/Russo+One) by Jovanny Lemona
 
 Track layouts are stylised shapes inspired by real circuits. The circuit names belong to their owners.
 
-## Native version (Godot 4.7)
+## v2.1
 
-`godot/` is the native port: same physics and tuning as `index.html`, drawn in real 3D with bloom.
-
-v2.0 adds: instant restart (no countdown), 1/3/5-lap races, a best-lap ghost, live splits at every apex,
+Instant restart (no countdown), 1/3/5-lap races, a best-lap ghost, live splits at every apex,
 a combo chain (apexes, boosts and close calls without riding a wall raise a multiplier up to x2),
-close-call rewards for skimming the wall, a perfect-apex slow-mo, and procedurally generated synthwave
-music whose layers build with flow and pulse the neon on the beat.
+close-call rewards for skimming the wall, a perfect-apex flash, softer steering with a gentle
+auto-brake before corners, and procedurally generated synthwave music whose layers build with flow
+and pulse the neon on the beat.
 
-- Run on desktop: `godot --path godot`
-- Physics self-check: `godot --headless --path godot -s res://tests/sim.gd`
-- Android APK: `godot/build.sh` (needs Godot 4.7 export templates, JDK 17, Android SDK; signs with `android/neongokart.keystore`)
-- iOS: open `godot/` in the Godot editor, set your Apple team ID in the iOS export preset, export the Xcode project.
+`godot/` holds an experimental Godot 4.7 port. It is no longer maintained: the web build in
+`index.html` is the game.

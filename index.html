@@ -28,8 +28,11 @@ const hsl=(h,s,l,a=1)=>`hsla(${((h%360)+360)%360},${s}%,${l}%,${a})`;
 function angDiff(a,b){let d=(b-a)%TAU;if(d>Math.PI)d-=TAU;if(d<-Math.PI)d+=TAU;return d;}
 function fmt(t){if(t==null||!isFinite(t))return '-:--.--';const m=Math.floor(t/60),s=t-m*60;return m+':'+(s<10?'0':'')+s.toFixed(2);}
 const store={get(k,d){try{const v=localStorage.getItem('ngk_'+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set(k,v){try{localStorage.setItem('ngk_'+k,JSON.stringify(v));}catch(e){}}};
-const settings=Object.assign({music:true,sfx:true,bot:false,view:'fps',sky:'cyber'},store.get('settings',{}));
+const settings=Object.assign({music:true,sfx:true,bot:false,view:'fps',sky:'cyber',laps:3},store.get('settings',{}));
+if(![1,3,5].includes(settings.laps))settings.laps=3;
 const records=store.get('records2',{})||{};
+// v1 kept one best race time (5 laps); race times are now kept per lap count
+for(const k in records){const v=records[k];if(v&&v.total!=null){if(v.total5==null)v.total5=v.total;delete v.total;}}
 
 // racing line: the rival bot's lateral grip and braking (u/s²) set its speed through each corner
 const BOT_LAT=1900,BOT_DEC=900;
@@ -76,13 +79,14 @@ for(const T of TRACKS){const pa=new Path2D();pa.moveTo(T.P[0].x,T.P[0].y);for(le
 const SLOTS=TRACKS.length+1; // last slot: future track
 
 // ---------- tuning ----------
-const LAPS=5,V0=520,ACC=700,BRAKE=1500,DT=1/120;
+const LAP_CHOICES=[1,3,5],V0=520,ACC=700,BRAKE=1500,DT=1/120;
+const GHOST_HZ=30,NEAR=6;   // ghost path samples per second; close-call band just inside the wall (the racing line stays outside it)
 const A_GRIP=1350,LINE_GRIP=.7,BOT_SKILL=.93,ASSIST_STEP=.2,ASSIST_MIN=.4,A_DRIFT=2600,SCRUB=.55;   // tyre grip limit (u/s²), drift turning strength, speed scrubbed by the slide
 const FLOW_GAIN=0.85,FLOW_TAU=40;           // vmax = V0*(1+0.85F), dF/dt=(1-F)/40 while clean
 const LVL_AT=[0,0.5,1.3,2.3],LVLC=['#fff','#38d6ff','#ff9a1f','#ff3df0'];
 
 // ---------- state ----------
-const G={state:'title',t:0,sel:0,slide:0,overlay:null,toast:null,drawOv:false,swipe:null};
+const G={state:'title',t:0,sel:0,slide:0,overlay:null,toast:null,drawOv:false,swipe:null,dirty:false};
 let R=null;
 const UI=[];
 const keys=new Set();
@@ -90,7 +94,7 @@ const ptr={left:null,right:null};
 const uiU=()=>clamp(Math.min(W,H)/420,0.75,1.5);
 
 // ---------- audio ----------
-const A={C:null,beats:[],pulse:0,step:0,next:0,tr:0,E:null};
+const A={C:null,beats:[],pulse:0,step:0,next:0,tr:0,E:null,mus:null,mcut:20000};
 const mtof=m=>440*Math.pow(2,(m-69)/12);
 function makeImpulse(C,sec){const len=Math.floor(C.sampleRate*sec),b=C.createBuffer(2,len,C.sampleRate);for(let ch=0;ch<2;ch++){const d=b.getChannelData(ch);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,3);}return b;}
 function makeNoise(C){const len=C.sampleRate,b=C.createBuffer(1,len,C.sampleRate),d=b.getChannelData(0);for(let i=0;i<len;i++)d[i]=Math.random()*2-1;return b;}
@@ -106,8 +110,9 @@ function initAudio(){
  const fs=C.createGain();fs.gain.value=.18;A.fx.connect(fs);fs.connect(A.rev);
  A.noise=makeNoise(C);
  buildEngine();applySettings();
+ setTimeout(buildMusic,60);   // a few dozen ms of synthesis: let the tap's frame draw first
 }
-function applySettings(){if(!A.C)return;A.fx.gain.setTargetAtTime(settings.sfx?1:0,A.C.currentTime,.05);}
+function applySettings(){if(!A.C)return;A.fx.gain.setTargetAtTime(settings.sfx?1:0,A.C.currentTime,.05);if(A.mg)A.mg.gain.setTargetAtTime(settings.music?.55:0,A.C.currentTime,.05);}
 function env(g,t,peak,att,dec){g.gain.setValueAtTime(.0001,t);g.gain.linearRampToValueAtTime(peak,t+att);g.gain.exponentialRampToValueAtTime(.0001,t+att+dec);}
 
 // Engine = endless-rising Shepard-Risset glissando (the "always climbing" tension) filtered like an EV whine.
@@ -137,20 +142,65 @@ function tone(type,f,t,v,d,f2){const C=A.C,os=C.createOscillator();os.type=type;
 function noiseHit(t,type,f,f2,v,d,q=1){const C=A.C,s=C.createBufferSource();s.buffer=A.noise;const fl=C.createBiquadFilter();fl.type=type;fl.Q.value=q;fl.frequency.setValueAtTime(f,t);if(f2)fl.frequency.exponentialRampToValueAtTime(f2,t+d);const g=C.createGain();env(g,t,v,.003,d);s.connect(fl);fl.connect(g);g.connect(A.fx);s.start(t,Math.random()*.4);s.stop(t+d+.05);}
 function sBeep(f,d){if(!A.C)return;tone('square',f,A.C.currentTime,.12,d);}
 function sClick(){if(!A.C)return;tone('sine',1250,A.C.currentTime,.12,.05);}
-function sHit(imp){if(!A.C)return;const t=A.C.currentTime,v=.15+.4*Math.min(1,imp/250);noiseHit(t,'lowpass',900,200,v,.35);tone('sine',95,t,v,.3,35);}
+function sHit(imp){A.mcut=350;if(!A.C)return;const t=A.C.currentTime,v=.15+.4*Math.min(1,imp/250);noiseHit(t,'lowpass',900,200,v,.35);tone('sine',95,t,v,.3,35);}
 function sBoost(L){if(!A.C)return;const t=A.C.currentTime;noiseHit(t,'bandpass',300,4200,.22+.06*L,.55,2);tone('sawtooth',110*L,t,.06,.5,440*L);}
-function sApex(){if(!A.C)return;const t=A.C.currentTime;tone('sine',1568,t,.12,.6);tone('sine',2093,t+.06,.09,.6);}
+// each apex in a combo rings a semitone higher
+function sApex(c=1){if(!A.C)return;const t=A.C.currentTime,p=Math.pow(2,clamp(c-1,0,12)/12);tone('sine',1568*p,t,.12,.6);tone('sine',2093*p,t+.06,.09,.6);}
+function sNear(c){if(!A.C)return;noiseHit(A.C.currentTime,'bandpass',2400*Math.pow(2,clamp(c-1,0,12)/12),500,.4,.28,1.5);}
+function sDrop(){if(!A.C)return;tone('square',600,A.C.currentTime,.1,.3,150);}
 function sCharge(L){if(!A.C)return;tone('square',[0,660,880,1175][L],A.C.currentTime,.07,.12);}
 function sLap(){if(!A.C)return;const t=A.C.currentTime;[0,4,7,12].forEach((n,i)=>tone('triangle',mtof(74+n),t+i*.07,.14,.25));}
 
+// ---------- music: a synthwave loop synthesised once, split into layers that fade in with flow ----------
+// pad, kick, bass, drums, arpeggio. All layers have the same length, so they stay locked together while looping.
+const MVOL=[.35,.9,.55,.5,.4];
+function buildMusic(){
+ const C=A.C;if(!C||A.mus)return;
+ const RATE=22050,STEP=.125,N=Math.floor(STEP*64*RATE),CH=[[57,60,64],[53,57,60],[48,52,55],[55,59,62]];   // Am F C G at 120 BPM
+ const L=[0,1,2,3,4].map(()=>new Float32Array(N));let seed=11;const rnd=()=>(seed=seed*16807%2147483647)/2147483647;
+ // one note, wrapped around the loop end; gain falls to sus over d, fEnd>0 sweeps the pitch
+ const note=(b,at,f,d,v,wave,att,sus,fEnd=0)=>{const i0=Math.floor(at*RATE),cnt=Math.floor(d*RATE),dec=Math.pow(sus,1/cnt),sw=fEnd>0?Math.pow(fEnd/f,1/cnt):1,na=Math.max(1,att*RATE),nr=RATE*.01;let ph=0,g=1,fr=f/RATE;
+  for(let i=0;i<cnt;i++){ph=(ph+fr)%1;fr*=sw;g*=dec;const y=wave===0?Math.sin(ph*TAU):wave===1?4*Math.abs(ph-.5)-1:wave===2?(ph<.5?1:-1):2*ph-1;b[(i0+i)%N]+=y*v*g*Math.min(1,i/na)*Math.min(1,(cnt-i)/nr);}};
+ const hiss=(b,at,d,v,high)=>{const i0=Math.floor(at*RATE),cnt=Math.floor(d*RATE),dec=Math.pow(.001,1/cnt);let g=1,lp=0;for(let i=0;i<cnt;i++){const x=rnd()*2-1;lp+=(high?.6:.3)*(x-lp);g*=dec;b[(i0+i)%N]+=(high?x-lp:lp)*v*g;}};
+ for(let bar=0;bar<4;bar++)for(const m of CH[bar])note(L[0],bar*16*STEP,mtof(m),16*STEP+.3,.07,1,.35,.35);
+ for(let s=0;s<64;s++){const at=s*STEP,c=CH[s>>4];
+  if(s%4===0)note(L[1],at,130,.32,.9,0,.002,.001,42);
+  let root=c[0]-24;if(root<33)root+=12;note(L[2],at,mtof(root+(s%4===2?12:0)),.11,.3,3,.004,.05);
+  hiss(L[3],at,s%2?.03:.07,s%2?.12:.22,true);if(s%8===4){hiss(L[3],at,.2,.5,false);note(L[3],at,190,.12,.3,0,.002,.01,120);}
+  const arp=[c[0],c[1],c[2],c[0]+12];note(L[4],at,mtof(arp[s%4]+12),.1,.08,2,.003,.02);}
+ // one-pole low-pass; the first pass only warms the filter up so the loop seam stays smooth
+ const lowp=(b,a)=>{let y=0;for(let i=0;i<N*2;i++){y+=a*(b[i%N]-y);if(i>=N)b[i-N]=y;}};lowp(L[0],.08);lowp(L[2],.18);lowp(L[4],.35);
+ {const b=L[4],src=Float32Array.from(b),dl=Math.floor(3*STEP*RATE);for(let i=0;i<N;i++)b[i]+=src[(i-dl+N)%N]*.35+src[(i-2*dl+2*N)%N]*.1225;}
+ A.mlp=C.createBiquadFilter();A.mlp.type='lowpass';A.mlp.frequency.value=20000;A.mlp.Q.value=.7;
+ A.mg=C.createGain();A.mg.gain.value=settings.music?.55:0;A.mlp.connect(A.mg);A.mg.connect(A.master);
+ const t0=C.currentTime+.05,g=[];
+ for(const d of L){const buf=C.createBuffer(1,N,RATE);buf.getChannelData(0).set(d);const src=C.createBufferSource();src.buffer=buf;src.loop=true;
+  const gg=C.createGain();gg.gain.value=0;src.connect(gg);gg.connect(A.mlp);src.start(t0);g.push(gg);}
+ A.mus={g,t0};
+}
+// layer the music by how well the run is going: menus calm, racing builds with flow and combo, paused muffled
+function musicTick(dt){
+ const M=A.mus;if(!M)return;const racing=G.state==='race'&&R,mode=!racing?0:G.overlay==='pause'?2:1;
+ let want=mode===0?[.8,0,.6,0,0]:mode===2?[.5,0,0,0,0]:[1,0,0,0,0];
+ if(mode===1&&R.phase!=='count'){const f=R.F,c=R.combo;want=[1,1,f>.1||c>=2?1:0,f>.3||c>=3?1:0,f>.55||c>=5||R.boost>0?1:0];}
+ const t=A.C.currentTime;
+ for(let i=0;i<5;i++){const w=want[i]*MVOL[i],gn=M.g[i].gain;gn.setTargetAtTime(w,t,w>gn.value?.08:.25);}
+ A.mcut=Math.min(20000,A.mcut*Math.exp(dt*4));   // a crash muffles the music, it opens back up over a second
+ A.mlp.frequency.setTargetAtTime(mode===2?900:A.mcut,t,.03);
+}
+// 0..1 position inside the current beat, locked to the music while it plays
+function beat(){if(A.mus&&settings.music&&A.C.state==='running')return((A.C.currentTime-A.mus.t0)%.5+.5)%.5/.5;return(G.t*2)%1;}
+
 // ---------- race ----------
-function newRace(ti){
+function newRace(ti,quick){
  const T=TRACKS[ti],i0=4,rec=records[T.id]||{};
  R={T,ti,x:T.P[i0].x,y:T.P[i0].y,h:Math.atan2(T.ty[i0],T.tx[i0]),vx:0,vy:0,F:0,charge:0,lvl:0,drift:false,dDir:0,beta:0,boost:0,
   idx:i0,prog:i0,lapsDone:0,lapStart:0,time:0,laps:[],count:3.2,phase:'count',hitCool:0,cleanLap:true,shake:0,flash:0,
-  trail:[],parts:[],pops:[],apexHit:new Set(),best:rec.lap==null?null:rec.lap,fin:0,total:0,newLap:false,newTotal:false,thr:0,st:0,br:false,hDir:0,holdT:0,onLine:0,place:0,bot:null,sts:0,wallGrip:0,assist:ASSIST_MIN,assistOn:0};
+  trail:[],parts:[],pops:[],apexHit:new Set(),best:rec.lap==null?null:rec.lap,fin:0,total:0,newLap:false,newTotal:false,thr:0,st:0,br:false,hDir:0,holdT:0,onLine:0,place:0,bot:null,sts:0,wallGrip:0,assist:ASSIST_MIN,assistOn:0,
+  lapsN:settings.laps,combo:0,wallT:0,nearT:0,ghostBuf:[],splits:[],delta:0,deltaT:0,deltaLap:false,kick:0,white:0,fk:0};
  if(settings.bot){R.x-=T.nx[i0]*24;R.y-=T.ny[i0]*24;R.bot={s:i0,s0:i0,lat0:24,v:0,F:0,slip:0,x:0,y:0,h:R.h,done:false,total:null};placeBot(0);}
  R.camA=R.h;R.camX=R.x;R.camY=R.y;R.fyaw=R.fyawP=R.h;R.px=R.x;R.py=R.y;
+ if(quick)R.count=0;   // instant retry: no countdown
 }
 // rival bot: rides the racing line with the speed profile, drifting where the corner load is high
 function placeBot(dt){
@@ -167,12 +217,20 @@ function stepBot(dt){
  const tgt=b.done?0:Math.min(T.lv[i],V0*(1+FLOW_GAIN*b.F))*BOT_SKILL;
  b.v=b.v<tgt?Math.min(tgt,b.v+ACC*.9*dt):Math.max(tgt,b.v-BOT_DEC*1.4*dt);
  b.s+=b.v*dt/T.lds[i];
- if(!b.done&&b.s>=LAPS*T.N){b.done=true;b.total=R.time;}
+ if(!b.done&&b.s>=R.lapsN*T.N){b.done=true;b.total=R.time;}
  placeBot(dt);
  if(Math.abs(b.slip)>.15&&Math.random()<.7){const fx=Math.cos(b.h),fy=Math.sin(b.h),bx=Math.cos(T.lh[i])*b.v,by=Math.sin(T.lh[i])*b.v;
   for(const sd of [-1,1]){const aa=b.h+Math.PI+(Math.random()-.5)*.9,sp=60+Math.random()*120;spawn(b.x-fx*10-fy*8*sd,b.y-fy*10+fx*8*sd,Math.cos(aa)*sp+bx*.3,Math.sin(aa)*sp+by*.3,.35,'#fff',2.5);}}
 }
-function startRace(ti){newRace(ti);G.state='race';G.overlay=null;ptr.left=ptr.right=null;}
+function startRace(ti,quick){newRace(ti,quick);G.state='race';G.overlay=null;ptr.left=ptr.right=null;}
+function restart(){if(R)startRace(R.ti,true);}
+// combo: every apex, boost and close call in a row without riding a wall adds 10%, up to x2
+const mult=()=>1+Math.min(R.combo,10)*.1;
+function comboBreak(){const r=R;if(r.combo>=3){pop('COMBO '+r.combo+' LOST','#ff4d6d',.9);sDrop();}r.combo=0;}
+// best-lap ghost at the current lap time, or null when there is none
+function ghostAt(r){const g=(records[r.T.id]||{}).ghost;if(!g||r.phase!=='go')return null;const f=(r.time-r.lapStart)*GHOST_HZ,i=Math.floor(f)*3;if(i+5>=g.length)return null;
+ const w=f-Math.floor(f);return{x:g[i]+(g[i+3]-g[i])*w,y:g[i+1]+(g[i+4]-g[i+1])*w,h:g[i+2]+angDiff(g[i+2],g[i+5])*w};}
+function saveRecords(){if(G.dirty){store.set('records2',records);G.dirty=false;}}
 function pop(text,c='#fff',life=1.2){if(R)R.pops.push({text,c,life,max:life});}
 function spawn(x,y,vx,vy,life,c,s){if(R.parts.length>500)return;R.parts.push({x,y,vx,vy,life,max:life,c,s});}
 function updParts(dt){const ps=R.parts;for(let i=ps.length-1;i>=0;i--){const p=ps[i];p.life-=dt;if(p.life<=0){ps[i]=ps[ps.length-1];ps.pop();continue;}p.x+=p.vx*dt;p.y+=p.vy*dt;const d=1-dt*3;p.vx*=d;p.vy*=d;}}
@@ -185,7 +243,7 @@ function readInput(){
 }
 function endDrift(reward){
  const r=R;if(!r.drift)return;const L=r.lvl;r.drift=false;r.lvl=0;r.charge=0;
- if(reward&&L>0){r.boost=[0,.5,.85,1.3][L];const fx=Math.cos(r.h),fy=Math.sin(r.h);r.vx+=fx*70*L;r.vy+=fy*70*L;r.F=Math.min(1,r.F+.015*L);
+ if(reward&&L>0){r.boost=[0,.5,.85,1.3][L];const fx=Math.cos(r.h),fy=Math.sin(r.h);const m=mult();r.vx+=fx*70*L*m;r.vy+=fy*70*L*m;r.F=Math.min(1,r.F+.015*L*m);r.combo++;
   pop(['','BOOST','SUPER BOOST','ULTRA BOOST'][L],LVLC[L]);sBoost(L);
   for(let i=0;i<14*L;i++){const a=r.h+Math.PI+(Math.random()-.5)*1.2,s=150+Math.random()*250;spawn(r.x-fx*12,r.y-fy*12,Math.cos(a)*s,Math.sin(a)*s,.5,LVLC[L],4);}}
 }
@@ -202,14 +260,15 @@ function stepRace(dt){
  inp.br=r.drift?(r.dDir<0?inp.L:inp.R):(dir!==0&&r.holdT>=HOLD_DRIFT);
  r.thr=inp.thr;r.st=inp.st;r.br=inp.br;
  if(r.bot)stepBot(dt);
- r.shake=Math.max(0,r.shake-dt*2.5);r.flash=Math.max(0,r.flash-dt*2);r.hitCool-=dt;
+ r.shake=Math.max(0,r.shake-dt*2.5);r.flash=Math.max(0,r.flash-dt*2);r.hitCool-=dt;r.deltaT-=dt;r.kick=Math.max(0,r.kick-dt*3);
  updParts(dt);for(const p of r.pops)p.life-=dt;r.pops=r.pops.filter(p=>p.life>0);
  if(r.phase==='count'){const prev=Math.ceil(r.count);r.count-=dt;const nw=Math.ceil(r.count);
   if(nw<prev&&nw>0&&nw<=3)sBeep(440,.18);
   if(r.count<=0){r.phase='go';r.time=0;r.lapStart=0;sBeep(880,.4);pop('GO!','#fff',1.1);}
   camFollow(dt);return;}
  let thr=inp.thr,st=inp.st,br=inp.br;
- r.sts+=(st-r.sts)*Math.min(1,dt*12);st=r.sts;
+ // steering builds up while held (a tap is a nudge, a hold is full lock) and lets go quickly; it reacts faster before a tight corner
+ {const tight=clamp(Math.abs(T.lk[(r.idx+12)%T.N])*400-1,0,1),rate=(Math.abs(st)<Math.abs(r.sts)||st*r.sts<0)?10:3.5+4.5*tight;r.sts+=clamp(st-r.sts,-rate*dt,rate*dt);st=r.sts;}
  if(r.phase==='finish'){const j=(r.idx+14)%T.N,des=Math.atan2(T.P[j].y-r.y,T.P[j].x-r.x);st=clamp(angDiff(r.h,des)*2.2,-1,1);thr=Math.hypot(r.vx,r.vy)<V0*.55?.6:0;br=false;r.fin+=dt;}
  else r.time+=dt;
  const spd=Math.hypot(r.vx,r.vy);
@@ -232,12 +291,14 @@ function stepRace(dt){
   if(L>r.lvl){r.lvl=L;sCharge(L);}
  }else{
   // grip: the tyres cap how fast the kart can turn at speed, so tight corners need the brake or a drift
-  const want=st*4.2*clamp(.25+spd/170,0,1),cap=A_GRIP*(1+LINE_GRIP*r.onLine+(r.wallGrip>0?.6:0))/Math.max(spd,60);r.wallGrip-=dt;
+  const want=st*3.6*clamp(.25+spd/170,0,1),cap=A_GRIP*(1+LINE_GRIP*r.onLine+(r.wallGrip>0?.6:0))/Math.max(spd,60);r.wallGrip-=dt;
   r.h+=clamp(want,-cap,cap)*dt;
   const gx=Math.cos(r.h),gy=Math.sin(r.h);
   let vf=r.vx*gx+r.vy*gy,vl=-r.vx*gy+r.vy*gx,a=thr*ACC*(1-vf/vmax);
   if(thr<.05)a-=160;if(br)a-=BRAKE;
   if(vf>vmax)a=Math.min(a,-(vf-vmax)*1.2);
+  // no brake button: above the speed the racing line can carry into the next corner, ease off automatically
+  {const safe=T.lv[r.idx]*1.1;if(r.phase==='go'&&vf>safe)a=Math.min(a,-Math.min(BRAKE*.7,(vf-safe)*3));}
   if(r.boost>0){r.boost-=dt;a+=700;}
   vf=Math.max(0,vf+a*dt);vl*=Math.exp(-9*dt);
   r.vx=gx*vf-gy*vl;r.vy=gy*vf+gx*vl;
@@ -259,17 +320,21 @@ function stepRace(dt){
  let di=bi-r.idx;if(di>T.N/2)di-=T.N;else if(di<-T.N/2)di+=T.N;r.prog+=di;r.idx=bi;
  // walls
  const P=T.P[bi],dist=Math.sqrt(bd),lim=HW-9;
- if(dist>lim){const ux=(r.x-P.x)/dist,uy=(r.y-P.y)/dist;r.x=P.x+ux*lim;r.y=P.y+uy*lim;const vn=r.vx*ux+r.vy*uy;
+ // close call: skim the wall at speed without touching it, then pull away for a combo point and a little boost
+ if(dist<=lim){r.wallT=0;if(r.phase==='go'&&dist>lim-NEAR&&spd>V0*.6)r.nearT+=dt;
+  else{if(r.nearT>=.2){r.combo++;r.F=Math.min(1,r.F+.03*mult());r.boost=Math.max(r.boost,.2+.3*Math.min(1,r.nearT));pop('CLOSE CALL','#fff6c0',.8);sNear(r.combo);}r.nearT=0;}}
+ else{r.nearT=0;const ux=(r.x-P.x)/dist,uy=(r.y-P.y)/dist;r.x=P.x+ux*lim;r.y=P.y+uy*lim;const vn=r.vx*ux+r.vy*uy;
   if(vn>0){
    // a wall only slows you down: drop the into-wall speed, turn the nose along the track and keep sliding
    r.vx-=ux*vn;r.vy-=uy*vn;const tH=Math.atan2(T.ty[bi],T.tx[bi]),tx=Math.cos(tH),ty=Math.sin(tH);
    // glancing contact rides the wall: no penalty, sparks and a short grip boost (drift keeps going).
    // Only a head-on hit (into-wall speed > 45% of total) costs a little speed and flow.
    const hard=vn>60&&vn>.45*spd;
-   if(hard&&r.hitCool<=0&&r.phase==='go'){r.vx*=.88;r.vy*=.88;r.F=Math.max(0,r.F-.1);r.assist=Math.max(ASSIST_MIN,r.assist-ASSIST_STEP);r.cleanLap=false;r.hitCool=.4;r.shake=clamp(vn/300,.2,.7);r.flash=.25;endDrift(false);sHit(vn*.7);pop('BUMP','#ff4d6d',.6);r.h+=angDiff(r.h,tH)*.5;
+   if(hard&&r.hitCool<=0&&r.phase==='go'){r.vx*=.88;r.vy*=.88;r.F=Math.max(0,r.F-.1);r.assist=Math.max(ASSIST_MIN,r.assist-ASSIST_STEP);r.boost=0;comboBreak();r.cleanLap=false;r.hitCool=.4;r.shake=clamp(vn/300,.2,.7);r.flash=.25;endDrift(false);sHit(vn*.7);pop('BUMP','#ff4d6d',.6);r.h+=angDiff(r.h,tH)*.5;
     for(let i=0;i<16;i++){const aa=Math.random()*TAU,s=80+Math.random()*220;spawn(r.x+ux*9,r.y+uy*9,Math.cos(aa)*s,Math.sin(aa)*s,.4,hsl(T.hue,100,70),3);}}
    // glancing contact still costs speed silently: the steeper the touch the more it scrubs, scraping drags and drains flow
-   else if(r.phase==='go'){r.wallGrip=.5;const d=(1-clamp(.9*vn/Math.max(spd,1),0,.35))*(1-dt*2.2);r.vx*=d;r.vy*=d;r.F=Math.max(0,r.F-dt*.08);
+   else if(r.phase==='go'){r.wallGrip=.5;r.wallT+=dt;if(r.wallT>.12)comboBreak();r.boost=Math.max(0,r.boost-dt*6);   // a brush is forgiven, riding the wall is not; scraping burns the boost
+   const d=(1-clamp(.9*vn/Math.max(spd,1),0,.35))*(1-dt*2.2);r.vx*=d;r.vy*=d;r.F=Math.max(0,r.F-dt*.08);
     if(Math.random()<.5){const aa=Math.atan2(-r.vy,-r.vx)+(Math.random()-.5)*.8,s=100+Math.random()*200;spawn(r.x+ux*9,r.y+uy*9,Math.cos(aa)*s,Math.sin(aa)*s,.3,'#fff6c0',2.5);}}
    if(!r.drift)r.h+=angDiff(r.h,tH)*Math.min(1,dt*6);
    const vt=r.vx*tx+r.vy*ty,vmin=V0*.3;if(r.phase==='go'&&vt<vmin){r.vx+=tx*(vmin-vt);r.vy+=ty*(vmin-vt);}}}
@@ -279,21 +344,28 @@ function stepRace(dt){
  r.trail.push({x:r.x-fx*12,y:r.y-fy*12});if(r.trail.length>260)r.trail.shift();
  // apex: drift through the inside of a corner
  if(r.phase==='go')for(const ap of T.apex){if(r.apexHit.has(ap.i))continue;let d=r.idx-ap.i;if(d>T.N/2)d-=T.N;else if(d<-T.N/2)d+=T.N;
-  if(Math.abs(d)<=3){const lat=(r.x-T.P[ap.i].x)*T.nx[ap.i]+(r.y-T.P[ap.i].y)*T.ny[ap.i];if(lat*ap.s>HW*.15){r.apexHit.add(ap.i);if(r.drift)r.charge+=.9;r.F=Math.min(1,r.F+.04);r.assist=Math.min(1,r.assist+ASSIST_STEP);
-   pop('APEX  ·  ASSIST '+Math.round(r.assist/ASSIST_STEP),hsl(T.hue+180,100,70),.9);sApex();}}}
+  if(Math.abs(d)<=3){const lat=(r.x-T.P[ap.i].x)*T.nx[ap.i]+(r.y-T.P[ap.i].y)*T.ny[ap.i];if(lat*ap.s>HW*.15){r.apexHit.add(ap.i);if(r.drift)r.charge+=.9;r.combo++;r.F=Math.min(1,r.F+.04*mult());r.assist=Math.min(1,r.assist+ASSIST_STEP);
+   // perfect: right on the inside kerb, where the racing line touches the corner
+   if(lat*ap.s>HW*.55){pop('PERFECT APEX','#fff',.9);r.white=.3;r.kick=1;}else pop('APEX  ·  ASSIST '+Math.round(r.assist/ASSIST_STEP),hsl(T.hue+180,100,70),.9);sApex(r.combo);}}}
+ // ghost path and the split times at each apex for this lap
+ if(r.phase==='go'){const lt=r.time-r.lapStart;while(r.ghostBuf.length/3<=Math.floor(lt*GHOST_HZ))r.ghostBuf.push(Math.round(r.x*10)/10,Math.round(r.y*10)/10,Math.round(r.h*1000)/1000);
+  const lp=r.prog-r.lapsDone*T.N,bs=(records[T.id]||{}).splits||[];
+  while(r.splits.length<T.apex.length&&lp>=T.apex[r.splits.length].i){if(r.splits.length<bs.length){r.delta=lt-bs[r.splits.length];r.deltaT=2;r.deltaLap=false;}r.splits.push(lt);}}
  if(r.phase==='go'&&r.prog>=(r.lapsDone+1)*T.N)lapDone();
  camFollow(dt);
 }
 function lapDone(){
  const r=R,T=r.T,lt=r.time-r.lapStart;r.laps.push(lt);r.lapStart=r.time;r.lapsDone++;
  const rec=records[T.id]||(records[T.id]={});
- if(rec.lap==null||lt<rec.lap){rec.lap=lt;r.newLap=true;pop('NEW BEST LAP','#fff',1.6);}
+ if(rec.lap!=null){r.delta=lt-rec.lap;r.deltaT=2.5;r.deltaLap=true;}
+ if(rec.lap==null||lt<rec.lap){rec.lap=lt;r.newLap=true;pop('NEW BEST LAP','#fff',1.6);rec.ghost=r.ghostBuf;rec.splits=r.splits;}
+ r.ghostBuf=[];r.splits=[];
  r.best=rec.lap;
  if(r.cleanLap){r.F=Math.min(1,r.F+.06);pop('CLEAN LAP  +FLOW',hsl(T.hue,100,72),1.4);}
  r.cleanLap=true;r.apexHit.clear();sLap();
- if(r.lapsDone===LAPS-1)pop('FINAL LAP','#ffd23d',1.6);
- if(r.lapsDone>=LAPS){r.phase='finish';if(r.bot)r.place=r.bot.done?2:1;r.total=r.time;if(rec.total==null||r.total<rec.total){rec.total=r.total;r.newTotal=true;}r.fin=0;endDrift(false);}
- store.set('records2',records);
+ if(r.lapsDone===r.lapsN-1)pop('FINAL LAP','#ffd23d',1.6);
+ if(r.lapsDone>=r.lapsN){r.phase='finish';if(r.bot)r.place=r.bot.done?2:1;r.total=r.time;const tk='total'+r.lapsN;if(rec[tk]==null||r.total<rec[tk]){rec[tk]=r.total;r.newTotal=true;}r.fin=0;endDrift(false);}
+ G.dirty=true;   // written once the race stops: the ghost makes the save too big for the lap line
 }
 
 // ---------- drawing helpers ----------
@@ -364,15 +436,15 @@ function renderSelect(dt){
  if(!soon)drawTrackPreview(T,pcx,pcy,ps,Math.sin(t*.4)*.12,t);
  else{ctx.save();ctx.translate(pcx,pcy);ctx.rotate(Math.sin(t*.4)*.12);const s=ps*.32;poly(0,0,6,s,t*.2);ctx.fillStyle='rgba(0,0,0,.6)';ctx.fill();ctx.setLineDash([12,10]);ctx.strokeStyle=hsl(hue,60,70,.8);ctx.lineWidth=3;ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#fff';ctx.fillRect(-s*.32,-4,s*.64,8);ctx.fillRect(-4,-s*.32,8,s*.64);ctx.restore();}
  // info band
- const by=H*.72,ns=Math.min(46*u,H*.085),bh=ns+66*u;
+ const ns=Math.min(46*u,H*.085),bh=ns+66*u,by=Math.min(H*.72,H-INS.b-bh-40*u);   // room for the cue under the band on short screens
  slab(-30,by,W+60,bh,0,'r','rgba(0,0,0,.84)');
  const name=soon?'İLERİDE EKLENECEK':T.name,nsz=fit(name,ns,W-60);
  txt(name,W/2,by+12*u+nsz/2,nsz,'center','#fff',hsl(hue,100,40));
  const rec=soon?{}:(records[T.id]||{});
- const line=soon?'NEW TRACK SLOT':'BEST LAP  '+fmt(rec.lap)+'     BEST RACE  '+fmt(rec.total);
+ const line=soon?'NEW TRACK SLOT':'BEST LAP  '+fmt(rec.lap)+'     BEST '+settings.laps+'-LAP RACE  '+fmt(rec['total'+settings.laps]);
  txt(line,W/2,by+22*u+ns+8*u,fit(line,14*u,W-40),'center',hsl(hue,100,75));
  if(!soon)txt(T.sub,W/2,by+22*u+ns+28*u,fit(T.sub,11*u,W-40),'center','rgba(255,255,255,.55)');
- const al=.5+.5*Math.sin(t*4),ts=18*u,cue=soon?'COMING SOON':'TAP TO RACE  ·  '+LAPS+' LAPS';
+ const al=.5+.5*Math.sin(t*4),ts=18*u,cue=soon?'COMING SOON':'TAP TO RACE  ·  '+settings.laps+(settings.laps===1?' LAP':' LAPS');
  txt(cue,W/2,Math.min(H-INS.b-22*u,by+bh+26*u),ts,'center',`rgba(255,255,255,${soon?.5:al})`);
  // arrows
  const aw=44*u,ah=58*u;
@@ -385,6 +457,8 @@ function renderSelect(dt){
  // bottom-left: rival bot toggle
  {const lb='RIVAL BOT: '+(settings.bot?'ON':'OFF'),rw=tw('RIVAL BOT: OFF',14*u)+34*u,rh=40*u;
   button(INS.l+14*u,H-INS.b-14*u-rh,rw,rh,lb,()=>{settings.bot=!settings.bot;store.set('settings',settings);},{size:14*u,slant:12*u,stroke:settings.bot?hsl(hue,100,62):null});}
+ // bottom-right: lap count
+ {const lw=tw('LAPS: 5',14*u)+34*u,lh=40*u;button(W-INS.r-14*u-lw,H-INS.b-14*u-lh,lw,lh,'LAPS: '+settings.laps,()=>{settings.laps=LAP_CHOICES[(LAP_CHOICES.indexOf(settings.laps)+1)%LAP_CHOICES.length];store.set('settings',settings);},{size:14*u,slant:12*u,side:'l'});}
  // page dots
  for(let i=0;i<SLOTS;i++){const dx=W/2+(i-(SLOTS-1)/2)*20*u;poly(dx,by-16*u,4,i===G.sel?7*u:4.5*u,Math.PI/4);ctx.fillStyle=i===G.sel?'#fff':'rgba(255,255,255,.35)';ctx.fill();}
 }
@@ -394,7 +468,8 @@ const FPS_NEAR=6,FPS_AHEAD=130,FPS_CAMH=17,FPS_BACK=0,FPS_WALL=12;
 function renderFPS(r,T,kh,dt){
  const al=clamp(G.alpha||0,0,1),yaw=r.fyawP+angDiff(r.fyawP,r.fyaw)*al,ch=Math.cos(yaw),sh=Math.sin(yaw);
  const kx=r.px+(r.x-r.px)*al,ky=r.py+(r.y-r.py)*al,cx=kx-ch*FPS_BACK,cy=ky-sh*FPS_BACK;
- const f=Math.max(W,H*1.4)*.5,hor=H*.4;
+ r.fk+=(((r.boost>0&&!RM)?.6:0)+(RM?0:r.kick)-r.fk)*Math.min(1,dt*6);   // FOV kick on boost and perfect apex
+ const f=Math.max(W,H*1.4)*.5*(1-.08*Math.min(1.4,r.fk)),hor=H*.4;
  let ox=0,oy=0;if(r.shake>0&&!RM){ox=(Math.random()-.5)*12*r.shake;oy=(Math.random()-.5)*12*r.shake;}
  drawSky(r,T,yaw,f,hor+oy,kh);
  const pj=(x,y,h)=>{const dx=x-cx,dy=y-cy,z=dx*ch+dy*sh;if(z<FPS_NEAR)return null;return [W/2+ox+(-dx*sh+dy*ch)/z*f,hor+oy+(FPS_CAMH-h)/z*f,z];};
@@ -425,11 +500,15 @@ function renderFPS(r,T,kh,dt){
   for(const ap of T.apex){const k=ids.indexOf(ap.i);if(k<0)continue;const P=T.P[ap.i],p=pj(P.x+T.nx[ap.i]*ap.s*(HW-12),P.y+T.ny[ap.i]*ap.s*(HW-12),2);if(!p)continue;
    const hit=r.apexHit.has(ap.i);ctx.fillStyle=hit?'#fff':hsl(kh,100,65,.5+.4*A.pulse);ctx.beginPath();ctx.arc(p[0],p[1],Math.max(2,(hit?7:5)/p[2]*f),0,TAU);ctx.fill();}
   // walls
-  ctx.fillStyle=hsl(T.hue,90,22,.85);poly2(L0,L1);ctx.fill();poly2(R0,R1);ctx.fill();
-  const ec=hsl(T.hue,100,62);pline(L0,ec,3);pline(R0,ec,3);pline(L1,hsl(T.hue,100,72),2);pline(R1,hsl(T.hue,100,72),2);ctx.lineCap='butt';
+  // the neon pulses on the beat (harder with flow) and its hue climbs with the combo
+  const nh=T.hue+Math.min(r.combo,10)*14,bp=A.pulse*(.3+.7*r.F);
+  ctx.fillStyle=hsl(nh,90,22,.85);poly2(L0,L1);ctx.fill();poly2(R0,R1);ctx.fill();
+  const ec=hsl(nh,100,62+12*bp),tc=hsl(nh,100,72+10*bp);pline(L0,ec,3+2*bp);pline(R0,ec,3+2*bp);pline(L1,tc,2);pline(R1,tc,2);ctx.lineCap='butt';
  }
  // fog: the far end of the road fades into the horizon
  const fg=ctx.createLinearGradient(0,hor+oy,0,hor+oy+H*.08);fg.addColorStop(0,GROUND[settings.sky]||GROUND.off);fg.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=fg;ctx.fillRect(0,hor+oy,W,H*.08);
+ // ghost as a faint hologram; hidden when it sits on top of the camera
+ {const gh=ghostAt(r);if(gh&&Math.hypot(gh.x-kx,gh.y-ky)>30){ctx.globalAlpha=.35;kart3D(pj,f,gh.x,gh.y,gh.h,190);ctx.globalAlpha=1;}}
  if(r.bot)kart3D(pj,f,r.bot.x,r.bot.y,r.bot.h,(T.hue+90)%360);
  if(r.boost>0){ctx.globalCompositeOperation='lighter';ctx.fillStyle=hsl(kh,100,60,.12*Math.min(1,r.boost*2));ctx.fillRect(0,0,W,H);ctx.globalCompositeOperation='source-over';}
  drawCockpit(r,kh,dt);
@@ -504,14 +583,17 @@ function drawCockpit(r,kh,dt){
  ctx.lineJoin='round';ctx.lineCap='round';ctx.strokeStyle='#0b0614';ctx.lineWidth=R0*.2;ctx.stroke();ctx.strokeStyle=glow;ctx.lineWidth=3;ctx.stroke();ctx.lineJoin='miter';ctx.lineCap='butt';
  ctx.fillStyle='#fff';ctx.fillRect(-2,-R0*.12,4,R0*.18);ctx.restore();
 }
+// red on a hit, white on a perfect apex
+function flashes(r,dt){if(r.flash>0){ctx.fillStyle=`rgba(255,40,80,${r.flash*.35})`;ctx.fillRect(0,0,W,H);}
+ if(r.white>0){ctx.fillStyle=`rgba(255,255,255,${r.white*.5})`;ctx.fillRect(0,0,W,H);r.white=Math.max(0,r.white-dt*2);}}
 function renderRace(dt){
  const r=R,T=r.T,u=uiU(),spd=Math.hypot(r.vx,r.vy),kh=(T.hue+180)%360;
- if(settings.view==='fps'){renderFPS(r,T,kh,dt);if(r.flash>0){ctx.fillStyle=`rgba(255,40,80,${r.flash*.35})`;ctx.fillRect(0,0,W,H);}hudRace(u,spd,kh);return;}
+ if(settings.view==='fps'){renderFPS(r,T,kh,dt);flashes(r,dt);hudRace(u,spd,kh);return;}
  const zoom=Math.min(W,H)/500*(1-.38*clamp(spd/1000,0,1)),sx=W/2,sy=H*(W>H?.74:.78);
  let ox=0,oy=0;if(r.shake>0&&!RM){ox=(Math.random()-.5)*14*r.shake;oy=(Math.random()-.5)*14*r.shake;}
  stripes(sx,sy,-r.camA+G.t*(RM?.03:.12*(1+r.F*2)),T.hue,A.pulse);
  ctx.save();ctx.translate(sx+ox,sy+oy);ctx.scale(zoom,zoom);ctx.rotate(-r.camA-Math.PI/2);ctx.translate(-r.camX,-r.camY);
- strokeTrack(T,HW*2+40,HW*2+8,HW*2-2,T.hue,A.pulse);
+ strokeTrack(T,HW*2+40,HW*2+8,HW*2-2,T.hue+Math.min(r.combo,10)*14,A.pulse*(.4+.6*r.F));
  ctx.setLineDash([26,44]);ctx.strokeStyle=hsl(T.hue,60,70,.12);ctx.lineWidth=3;ctx.stroke(T.path);ctx.setLineDash([]);
  drawStartLine(T,10);
  ctx.setLineDash([18,16]);ctx.lineCap='round';ctx.strokeStyle=hsl(kh,100,72,.16+.4*r.onLine);ctx.lineWidth=4;ctx.stroke(T.linePath);ctx.setLineDash([]);ctx.lineCap='butt';
@@ -523,10 +605,11 @@ function renderRace(dt){
  for(let seg=0;seg<n-1;seg+=6){const s0=tr.length-1-seg;if(s0<1)break;ctx.strokeStyle=hsl(kh,100,60,(1-seg/n)*.6);ctx.beginPath();ctx.moveTo(tr[s0].x,tr[s0].y);for(let j=1;j<=6&&s0-j>=0;j++)ctx.lineTo(tr[s0-j].x,tr[s0-j].y);ctx.stroke();}
  for(const p of r.parts){ctx.globalAlpha=p.life/p.max;ctx.fillStyle=p.c;ctx.fillRect(p.x-p.s/2,p.y-p.s/2,p.s,p.s);}
  ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
+ {const gh=ghostAt(r);if(gh){ctx.globalAlpha=.4;drawKart(gh.x,gh.y,gh.h,190,1,0);ctx.globalAlpha=1;}}
  if(r.bot)drawKart(r.bot.x,r.bot.y,r.bot.h,(T.hue+90)%360,1,0);
  drawKart(r.x,r.y,r.h,r.drift&&r.lvl?[0,195,30,300][r.lvl]:kh,1,r.boost>0?Math.min(1,r.boost*1.5):0);
  ctx.restore();
- if(r.flash>0){ctx.fillStyle=`rgba(255,40,80,${r.flash*.35})`;ctx.fillRect(0,0,W,H);}
+ flashes(r,dt);
  hudRace(u,spd,kh);
 }
 function hudRace(u,spd,kh){
@@ -534,7 +617,7 @@ function hudRace(u,spd,kh){
  // top-right: lap, current lap time, best lap
  const right=W-INS.r-14*u,top=INS.t+12*u,s1=30*u,s2=20*u,s3=14*u;
  const pos=!r.bot?0:r.phase==='finish'?r.place:(r.bot.done||r.bot.s>r.prog?2:1);
- const lapTxt=(pos?'P'+pos+'  ':'')+'LAP '+Math.min(r.lapsDone+1,LAPS)+'/'+LAPS;
+ const lapTxt=(pos?'P'+pos+'  ':'')+'LAP '+Math.min(r.lapsDone+1,r.lapsN)+'/'+r.lapsN;
  const cur=r.phase==='count'?0:r.phase==='finish'?r.total:r.time-r.lapStart;
  const curTxt=r.phase==='finish'?'TOTAL '+fmt(cur):fmt(cur),bestTxt='BEST '+fmt(r.best);
  const bw=Math.max(tw(lapTxt,s1),tw(curTxt,s2),tw(bestTxt,s3))+30*u,bh=s1+s2+s3+30*u;
@@ -542,10 +625,16 @@ function hudRace(u,spd,kh){
  txt(lapTxt,right-12*u,top+9*u+s1/2,s1,'right','#fff');
  txt(curTxt,right-12*u,top+15*u+s1+s2/2,s2,'right',hsl(T.hue,100,72));
  txt(bestTxt,right-12*u,top+20*u+s1+s2+s3/2,s3,'right','rgba(255,255,255,.7)');
+ // split against the best lap at every apex: green ahead, red behind
+ if(r.deltaT>0){const c=r.delta<=0?'61,255,154':'255,77,109';txt((r.deltaLap?'LAP ':'')+(r.delta<=0?'-':'+')+Math.abs(r.delta).toFixed(2),right-12*u,top+bh+20*u,26*u,'right',`rgba(${c},${Math.min(1,r.deltaT*2)})`,'rgba(0,0,0,.8)');}
  // top-left: pause
  const pb=46*u;
  button(INS.l+12*u,top,pb,pb,'',()=>{G.overlay='pause';},{slant:10*u});
  ctx.fillStyle='#fff';ctx.fillRect(INS.l+12*u+pb/2-7*u,top+pb/2-9*u,5*u,18*u);ctx.fillRect(INS.l+12*u+pb/2+3*u,top+pb/2-9*u,5*u,18*u);
+ // instant restart
+ {const rx=INS.l+24*u+pb,cx=rx+pb/2+2*u,cy=top+pb/2,rr=9*u,a0=-Math.PI*.3;button(rx,top,pb,pb,'',restart,{slant:10*u});
+  ctx.strokeStyle='#fff';ctx.lineWidth=3.5*u;ctx.lineCap='round';ctx.beginPath();ctx.arc(cx,cy,rr,a0,Math.PI*1.35);ctx.stroke();ctx.lineCap='butt';
+  const tx=cx+Math.cos(a0)*rr,ty=cy+Math.sin(a0)*rr;ctx.fillStyle='#fff';ctx.beginPath();ctx.moveTo(tx-7*u,ty-5*u);ctx.lineTo(tx+6*u,ty-3*u);ctx.lineTo(tx,ty+7*u);ctx.closePath();ctx.fill();}
  // bottom centre: flow + speed + drift charge
  const bwid=Math.min(W*.46,300*u),bx=W/2-bwid/2,byy=H-INS.b-26*u;
  slab(bx-12*u,byy-30*u,bwid+24*u,44*u,10*u,'r','rgba(0,0,0,.65)');
@@ -554,13 +643,14 @@ function hudRace(u,spd,kh){
  ctx.fillStyle='rgba(255,255,255,.14)';ctx.fillRect(bx,byy,bwid,6*u);ctx.fillStyle=hsl(kh,100,62);ctx.fillRect(bx,byy,bwid*r.F,6*u);
  {const n=Math.round(1/ASSIST_STEP),lv=Math.round(r.assist/ASSIST_STEP),pw=12*u;txt('ASSIST',bx-12*u,byy-44*u,11*u,'left',r.assistOn>.5?hsl(T.hue+180,100,75):'rgba(255,255,255,.55)');
   for(let i=0;i<n;i++)slab(bx+44*u+i*(pw+5*u),byy-48*u,pw,8*u,4*u,'r',i<lv?hsl(T.hue+180,100,65,.5+.5*r.assistOn):'rgba(255,255,255,.18)');}
+ if(r.combo>=2)txt('COMBO '+r.combo+'  ·  x'+mult().toFixed(1),bx+bwid+12*u,byy-66*u,(11+Math.min(r.combo,10)*.8)*u,'right',hsl(kh+r.combo*14,100,70),'rgba(0,0,0,.8)');
  if(r.drift){const pw=26*u;for(let i=1;i<=3;i++){const px=W/2+(i-2)*(pw+8*u)-pw/2,py=byy-52*u;slab(px,py,pw,10*u,5*u,'r',r.lvl>=i?LVLC[i]:'rgba(255,255,255,.18)');}}
  // touch feedback
  for(const sd of [-1,1]){if(!(sd<0?ptr.left:ptr.right))continue;const ex=sd<0?INS.l+18*u:W-INS.r-18*u,cy=H*.55,c=r.drift&&r.dDir===sd?LVLC[r.lvl]:'rgba(255,255,255,.4)';
   ctx.strokeStyle=c;ctx.lineWidth=5*u;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(ex-sd*14*u,cy-22*u);ctx.lineTo(ex,cy);ctx.lineTo(ex-sd*14*u,cy+22*u);ctx.stroke();ctx.lineCap='butt';
   if(r.drift&&r.dDir===sd)txt('DRIFT',ex-sd*30*u,cy-38*u,12*u,'center','rgba(255,255,255,.75)');}
  // guides at the start
- if(r.phase==='count'||(r.lapsDone===0&&r.time<3)){const al=r.phase==='count'?.85:Math.max(0,1-r.time/3)*.85;
+ if(r.best==null&&(r.phase==='count'||(r.lapsDone===0&&r.time<3))){const al=r.phase==='count'?.85:Math.max(0,1-r.time/3)*.85;
   ctx.strokeStyle=`rgba(255,255,255,${al*.25})`;ctx.setLineDash([8,10]);ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(W/2,H*.3);ctx.lineTo(W/2,H*.86);ctx.stroke();ctx.setLineDash([]);
   const gs=fit('HOLD LONGER = DRIFT',14*u,W*.42);
   txt('TAP = LEFT',W*.25,H*.6,gs,'center',`rgba(255,255,255,${al})`);txt('HOLD LONGER = DRIFT',W*.25,H*.6+20*u,gs,'center',`rgba(255,255,255,${al})`);
@@ -580,7 +670,9 @@ function renderOverlay(){
  G.drawOv=true;const u=uiU(),bw=Math.min(W-60,340*u),bh=48*u,gap=12*u,bx=W/2-bw/2,o=G.overlay;
  const hue=G.state==='race'&&R?R.T.hue:(G.state==='select'&&TRACKS[G.sel]?TRACKS[G.sel].hue:(G.t*14)%360);
  if(o==='settings'){let y=overlayPanel('SETTINGS',hue)+20*u;viewRow(bx,y,bw,bh,u);y+=bh+gap;
-  button(bx,y,bw,bh,'ENGINE + FX: '+(settings.sfx?'ON':'OFF'),()=>{settings.sfx=!settings.sfx;store.set('settings',settings);applySettings();},{size:17*u,stroke:settings.sfx?hsl(hue,100,62):null});y+=bh+gap*2;
+  {const half=(bw-12*u)/2,tg=k=>()=>{settings[k]=!settings[k];store.set('settings',settings);applySettings();};
+   button(bx,y,half,bh,'FX: '+(settings.sfx?'ON':'OFF'),tg('sfx'),{size:15*u,stroke:settings.sfx?hsl(hue,100,62):null});
+   button(bx+half+12*u,y,half,bh,'MUSIC: '+(settings.music?'ON':'OFF'),tg('music'),{size:fit('MUSIC: OFF',15*u,half-24*u),stroke:settings.music?hsl(hue,100,62):null});}y+=bh+gap*2;
   button(bx,y,bw,bh,'BACK',()=>{G.overlay=null;},{size:17*u});}
  else if(o==='leaderboard'){let y=overlayPanel('LEADERBOARD',hue)+16*u;
   button(bx,y,bw,bh,'GOOGLE PLAY GAMES',()=>toast('COMING IN THE FINAL VERSION'),{size:fit('GOOGLE PLAY GAMES',16*u,bw-30*u)});y+=bh+gap;
@@ -590,7 +682,7 @@ function renderOverlay(){
   y+=gap;button(bx,y,bw,bh,'BACK',()=>{G.overlay=null;},{size:17*u});}
  else if(o==='pause'){let y=overlayPanel('PAUSED',hue)+16*u;
   button(bx,y,bw,bh,'RESUME',()=>{G.overlay=null;},{size:17*u});y+=bh+gap;
-  button(bx,y,bw,bh,'RESTART',()=>startRace(R.ti),{size:17*u});y+=bh+gap;
+  button(bx,y,bw,bh,'RESTART',restart,{size:17*u});y+=bh+gap;
   viewRow(bx,y,bw,bh,u);y+=bh+gap;
   button(bx,y,bw,bh,'RETURN TO MENU',()=>{G.state='select';G.overlay=null;},{size:17*u});}
  else if(o==='finish'){const r=R;let y=overlayPanel('FINISH',hue)+18*u;
@@ -599,13 +691,13 @@ function renderOverlay(){
   if(r.newTotal){txt('NEW RECORD',W/2,y,14*u,'center','#ffd23d');}y+=24*u;
   const bl=Math.min(...r.laps);txt('BEST LAP  '+fmt(bl)+(r.newLap?'  ★':''),W/2,y,17*u,'center',hsl(hue,100,75));y+=26*u;
   const lt=r.laps.map((l,i)=>'L'+(i+1)+' '+fmt(l)).join('   ');txt(lt,W/2,y,fit(lt,12*u,W-40),'center','rgba(255,255,255,.6)');y+=30*u;
-  button(bx,y,bw,bh,'RACE AGAIN',()=>startRace(r.ti),{size:17*u,stroke:hsl(hue,100,62)});y+=bh+gap;
+  button(bx,y,bw,bh,'RACE AGAIN',restart,{size:17*u,stroke:hsl(hue,100,62)});y+=bh+gap;
   button(bx,y,bw,bh,'RETURN TO MENU',()=>{G.state='select';G.overlay=null;},{size:17*u});}
  G.drawOv=false;
 }
 function render(dt){
  ctx.setTransform(DPR,0,0,DPR,0,0);UI.length=0;
- A.pulse=Math.pow(1-((G.t*2)%1),4)*(RM?.3:1);
+ A.pulse=Math.pow(1-beat(),4)*(RM?.3:1);
  ctx.fillStyle='#07040d';ctx.fillRect(0,0,W,H);
  if(G.state==='title')renderTitle();else if(G.state==='select')renderSelect(dt);else if(G.state==='race'&&R)renderRace(dt);
  if(G.overlay)renderOverlay();
@@ -639,7 +731,8 @@ window.addEventListener('keydown',e=>{
  if(e.repeat){keys.add(kl);return;}
  initAudio();keys.add(kl);
  if(kl==='escape'||kl==='p'){if(G.overlay&&G.overlay!=='finish')G.overlay=null;else if(G.state==='race'&&!G.overlay)G.overlay='pause';else if(G.state==='select')G.state='title';return;}
- if(G.overlay){if(G.overlay==='finish'&&kl==='enter')startRace(R.ti);return;}
+ if(G.overlay){if(G.overlay==='finish'&&(kl==='enter'||kl==='r'))restart();return;}
+ if(G.state==='race'&&kl==='r'){restart();return;}
  if(G.state==='title'&&(kl==='enter'||kl===' '))goSelect();
  else if(G.state==='select'){if(kl==='arrowleft')changeSel(-1);else if(kl==='arrowright')changeSel(1);else if(kl==='enter'||kl===' ')tryStart();}
 });
@@ -647,7 +740,7 @@ window.addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
 // Android back button (called by the app wrapper): steps back one screen, 'exit' on the title screen
 window.__gkBack=()=>{if(G.overlay&&G.overlay!=='finish'){G.overlay=null;return 'ok';}if(G.state==='race'){if(!G.overlay)G.overlay='pause';else{G.state='select';G.overlay=null;}return 'ok';}if(G.state==='select'){G.state='title';return 'ok';}return 'exit';};
 window.addEventListener('blur',()=>{keys.clear();ptr.left=ptr.right=null;});
-window.__gkPause=()=>{keys.clear();ptr.left=ptr.right=null;if(A.C&&A.C.state==='running')A.C.suspend();if(G.state==='race'&&R&&R.phase!=='finish'&&!G.overlay)G.overlay='pause';};
+window.__gkPause=()=>{saveRecords();keys.clear();ptr.left=ptr.right=null;if(A.C&&A.C.state==='running')A.C.suspend();if(G.state==='race'&&R&&R.phase!=='finish'&&!G.overlay)G.overlay='pause';};
 document.addEventListener('visibilitychange',()=>{if(document.hidden)window.__gkPause();});
 
 // ---------- loop: physics fixed at 120 Hz, drawing at the display rate ----------
@@ -656,7 +749,8 @@ function frame(now){
  requestAnimationFrame(frame);
  let dt=(now-last)/1000;last=now;if(dt>.1)dt=.1;if(dt<0)dt=0;G.t+=dt;
  if(G.state==='race'&&R&&(!G.overlay||G.overlay==='finish')){acc+=dt;while(acc>=DT){stepRace(DT);acc-=DT;}G.alpha=acc/DT;if(R.phase==='finish'&&R.fin>1.2&&!G.overlay)G.overlay='finish';}else acc=0;
- if(A.C)engineTick(dt);
+ if(A.C){engineTick(dt);musicTick(dt);}
+ if(G.overlay||G.state!=='race')saveRecords();
  render(dt);
 }
 requestAnimationFrame(frame);
